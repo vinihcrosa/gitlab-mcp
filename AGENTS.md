@@ -4,9 +4,9 @@ Este documento existe para orientar qualquer agente de código (humano ou LLM) q
 
 ## 1. O que este produto faz
 
-O **gitlab-mcp** é um servidor MCP (Model Context Protocol) que roda sobre **stdio** e funciona como um proxy fino sobre a **REST API v4** de uma instância **GitLab CE self-hosted**. O escopo é deliberadamente pequeno (é um MVP com um objetivo só): **navegar merge requests e deixar review inline sem abrir o browser**. Tudo que não serve a esse objetivo está fora de escopo — nada de issues, pipelines, criação/merge de MR, aprovações, ou recursos Premium/Ultimate.
+O **gitlab-mcp** é um servidor MCP (Model Context Protocol) que roda sobre **stdio** e funciona como um proxy fino sobre a **REST API v4** de uma instância **GitLab CE self-hosted**. O escopo é deliberadamente pequeno (é um MVP com um objetivo só): **navegar merge requests e deixar review inline sem abrir o browser**. **Ler** o estado da CI entra nesse objetivo — a medição de uso real (157 de 632 chamadas `gh`) mostrou que o fluxo trava exatamente quando a pipeline quebra; ver `docs/adr/2026-08-12-pipelines-re-enter-scope-on-measured-usage.md`. **Escrever** em CI não entra: nada dispara, cancela ou re-roda pipeline, e nada lê variável ou secret. Fora de escopo também — issues, criação/merge de MR, aprovações, ou recursos Premium/Ultimate.
 
-O servidor expõe exatamente **10 tools MCP**, registradas em ordem em `src/tools/index.ts`:
+O servidor expõe exatamente **13 tools MCP**, registradas em ordem em `src/tools/index.ts`:
 
 1. `whoami` — identidade do token (`src/tools/whoami.ts`).
 2. `list_my_projects` — projetos onde o usuário é membro (`src/tools/projects.ts`).
@@ -18,8 +18,11 @@ O servidor expõe exatamente **10 tools MCP**, registradas em ordem em `src/tool
 8. `comment_on_mr` — comentário geral no MR (escrita, `src/tools/write.ts`).
 9. `comment_on_mr_line` — thread de review ancorada em linha do diff (escrita, `src/tools/write.ts`).
 10. `reply_to_mr_discussion` — resposta em thread existente (escrita, `src/tools/write.ts`).
+11. `get_mr_pipeline` — pipeline mais recente do MR e seus jobs (leitura, `src/tools/pipelines.ts`).
+12. `get_job_log` — log do job, limpo e cortado pela cauda (leitura, `src/tools/pipelines.ts`).
+13. `list_pipelines` — pipelines do projeto, filtradas na API (leitura, `src/tools/pipelines.ts`).
 
-As três últimas são **tools de escrita** e só funcionam quando `GITLAB_READ_ONLY=false` (literal exato). Esse ponto é repetido mais adiante na seção de segurança porque é um dos invariantes mais importantes do projeto.
+As tools 8, 9 e 10 são **tools de escrita** e só funcionam quando `GITLAB_READ_ONLY=false` (literal exato). Esse ponto é repetido mais adiante na seção de segurança porque é um dos invariantes mais importantes do projeto.
 
 ## 2. Estrutura real do repositório
 
@@ -39,19 +42,25 @@ gitlab-mcp/
 │   ├── gitlab.ts         # único ponto de saída HTTP; retry de 429; erros traduzidos
 │   ├── errors.ts         # GitLabError, ToolError, messageOf
 │   ├── diff.ts           # parser de diff unificado — lógica pura, sem I/O
+│   ├── trace.ts          # limpeza e corte pela cauda de trace — lógica pura, sem I/O
+│   ├── pipelines.ts      # projeção/decisão/renderização de CI — lógica pura, sem I/O
 │   ├── format.ts         # pick/truncate/untrusted/pageBlock — projeção de saída
 │   ├── projects.ts       # resolução e cache de projetos (path <-> id)
 │   └── tools/
-│       ├── index.ts      # registerAll — ordem de registro das 10 tools
+│       ├── index.ts      # registerAll — ordem de registro das 13 tools
 │       ├── register.ts   # wrapper tool() + assertWritable()
 │       ├── whoami.ts     # tool 1
 │       ├── projects.ts   # tool 2
 │       ├── mrs.ts        # tools 3, 4, 5
 │       ├── diff.ts       # tool 6
 │       ├── discussions.ts# tool 7
-│       └── write.ts      # tools 8, 9, 10
+│       ├── write.ts      # tools 8, 9, 10
+│       └── pipelines.ts  # tools 11, 12, 13
 ├── test/
-│   └── diff.test.ts      # único arquivo de teste; cobre o parser de diff
+│   ├── diff.test.ts      # parser de diff
+│   ├── trace.test.ts     # limpeza e corte de trace
+│   ├── pipelines.test.ts # projeção, decisão e renderização de CI
+│   └── register.test.ts  # superfície de tools registradas
 └── dist/                 # saída compilada do tsc — nunca edite à mão
 ```
 
@@ -69,7 +78,7 @@ Estes são os únicos scripts definidos em `package.json`. Não existem outros c
 | `npm test` | `vitest run` — roda a suíte uma vez. |
 | `npm run test:watch` | `vitest` — roda a suíte em modo watch. |
 
-O runtime exigido é **Node >= 20** (campo `engines` do `package.json`). O único arquivo de teste existente é `test/diff.test.ts`, que cobre o parser de diff (`src/diff.ts`) — a única lógica pura do projeto e, por decisão registrada em comentário no próprio arquivo, o único ponto do MVP que merece teste.
+O runtime exigido é **Node >= 20** (campo `engines` do `package.json`). Os testes cobrem a lógica pura do projeto: `test/diff.test.ts` (parser de diff), `test/trace.test.ts` (limpeza e corte de trace de job), `test/pipelines.test.ts` (projeção, decisão e renderização de CI) e `test/register.test.ts` (superfície de tools registradas). O critério é o registrado em comentário no topo de `src/diff.ts`: lógica pura, onde saída errada parece plausível. Camada de I/O segue sem teste — não há fixture server, e isso está declarado em `docs/features/001-ci-pipelines/tests.md`.
 
 ## 4. Invariantes de domínio (derivados do código-fonte)
 
@@ -80,7 +89,7 @@ Estes invariantes vêm diretamente do código. Cada um deles tem consequência c
 - **`iid` ≠ `id` global.** Todas as tools de MR usam o `iid` — o número que aparece na URL (`/-/merge_requests/123`) — nunca o `id` global do GitLab. As descrições das tools repetem isso de propósito.
 - **Config validada no boot, ou o processo morre.** `loadConfig()` acumula todos os erros de env, imprime em stderr e chama `process.exit(1)`. Nunca subir um server quebrado (`src/config.ts`).
 - **URL normalizada.** `normalizeGitlabUrl()` remove barras finais e um sufixo `/api/v4` colado por engano. `GITLAB_URL` precisa começar com `http://` ou `https://`.
-- **Todo HTTP passa por `gl()`.** `src/gitlab.ts` é o único ponto de saída HTTP do servidor. Toda tool passa por ali; nenhuma tool faz `fetch` por conta própria.
+- **Todo HTTP sai por `src/gitlab.ts`** — hoje `gl()` para corpo JSON e `glText()` para corpo de texto (trace de job), ambos sobre o mesmo `request()`, que concentra timeout, retry de 429, CA privada e tradução de erro. O invariante é o módulo, não a função: `src/gitlab.ts` é o único ponto de saída HTTP do servidor. Toda tool passa por ali; nenhuma tool faz `fetch` por conta própria.
 - **429 tem retry único.** Ao receber 429, o servidor respeita `Retry-After` (limitado a 60s; default 5s quando ausente), tenta exatamente mais uma vez e desiste (`src/gitlab.ts`).
 - **Chave ausente ≠ chave `null`.** No payload de `position` enviado ao GitLab, chaves omitidas continuam omitidas — o GitLab rejeita `null` implícito (`src/tools/write.ts`, `src/gitlab.ts`).
 - **`diff_refs` sempre frescos.** `comment_on_mr_line` rebusca o MR na hora de comentar em vez de aceitar shas como parâmetro: se alguém deu push desde a última leitura, os shas mudaram e a posição fica inválida (`src/tools/write.ts`).
@@ -115,8 +124,12 @@ Estes invariantes vêm diretamente do código. Cada um deles tem consequência c
 - **Modo read-only é o default e é um recurso de segurança.** Só o literal `'false'` em `GITLAB_READ_ONLY` libera as três tools de escrita. Não altere esse default, não inverta a lógica, não afrouxe a comparação. (Sim, isto já foi dito na seção 4 — é importante o suficiente para repetir.)
 - **Não existe opção de desabilitar verificação TLS — de propósito** (comentário explícito em `initHttp`, `src/gitlab.ts`). O caminho suportado para certificados privados é `GITLAB_CA_CERT` apontando para um PEM. Nunca adicione um flag de "ignorar certificado".
 - **O token nunca aparece em logs nem em saída de tool.** Ele vai apenas no header `PRIVATE-TOKEN` das requisições. Não o inclua em mensagens de erro, logs de debug ou payloads de retorno.
-- **Conteúdo escrito por usuários do GitLab é dado, não instrução.** O envelope `<untrusted>` + `UNTRUSTED_NOTE` existe para mitigar prompt injection vindo de descrições de MR e comentários. Qualquer campo novo de texto livre vindo do GitLab deve passar por `untrusted()` também.
-- Escopos de token documentados em `.env.example`: `read_api` cobre as tools 1–7; `api` é obrigatório para as três tools de escrita.
+- **Conteúdo escrito por usuários do GitLab é dado, não instrução.** Há duas primitivas de marcação, e a escolha é pela forma da saída:
+  - `untrusted()` + `UNTRUSTED_NOTE` para conteúdo em bloco, que ocupa linhas próprias: descrição de MR, corpo de comentário, trace de job. Envelope de várias linhas.
+  - `inlineUntrusted()` + `INLINE_UNTRUSTED_NOTE` para texto livre *no meio* de uma linha que o servidor escreveu: nome de job, stage, branch, `failure_reason`. Envelope não cabe aí; a função neutraliza ANSI, quebra de linha e o delimitador, e a nota rotula a resposta.
+  - A ordem dentro de `inlineUntrusted` é o controle: ANSI sai **antes** do delimitador. Invertida, um ESC plantado no token derrota o escape e o strip de ANSI depois fabrica um delimitador vivo.
+  - Todo campo novo de texto livre vindo do GitLab passa por uma das duas. Nenhum vai cru para a saída.
+- Escopos de token documentados em `.env.example`: `read_api` cobre as tools 1–7, 11 e 13; `api` é obrigatório para as três tools de escrita. `get_job_log` (12) exige `api` **por precaução, não por medida** — não foi verificado se `read_api` alcança `/jobs/:id/trace`.
 - Segredos ficam fora do repositório: use um `.env` local baseado em `.env.example`. Nunca faça commit de token, `.env` ou qualquer credencial.
 
 ## 8. Ações que um agente NÃO pode executar
@@ -126,7 +139,7 @@ Estes invariantes vêm diretamente do código. Cada um deles tem consequência c
 - **Não adicionar flag para pular verificação TLS**, sob nenhum pretexto.
 - **Não mudar o default de `GITLAB_READ_ONLY`** nem enfraquecer `assertWritable()`.
 - **Não devolver JSON cru do GitLab** em nenhuma tool nova — sempre projetar com whitelist e truncar textos longos.
-- **Não fazer chamadas HTTP fora de `gl()`** (`src/gitlab.ts`). Um único ponto de saída é o que torna erro, retry e timeout consistentes.
+- **Não fazer chamadas HTTP fora de `src/gitlab.ts`** — use `gl()` para JSON ou `glText()` para texto; se precisar de outra forma de corpo, adicione uma entrada nova ali sobre o mesmo `request()`, em vez de chamar `fetch` na tool. Um único ponto de saída é o que torna erro, retry e timeout consistentes.
 - **Não inventar scripts, ferramentas de lint ou pipelines** que não existem: os únicos comandos são os cinco listados na seção 3.
 - **Não logar ou expor o token** em nenhuma circunstância.
 - **Não fazer commit de `.env`** ou de qualquer credencial.

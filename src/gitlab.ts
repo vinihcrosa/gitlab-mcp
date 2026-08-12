@@ -30,6 +30,8 @@ export interface Page {
 export interface GitLabResponse<T> {
   data: T;
   page: Page;
+  /** Caracteres descartados na leitura, quando `maxTextChars` limitou o corpo. */
+  droppedChars?: number;
 }
 
 export interface RequestOptions {
@@ -40,6 +42,13 @@ export interface RequestOptions {
   body?: unknown;
   /** Nome legível do recurso, usado nas mensagens de erro. Ex.: `projeto "grupo/x"`. */
   resource?: string;
+  /**
+   * Teto de caracteres na LEITURA do corpo. Sem isto, `res.text()` materializa
+   * a resposta inteira antes de qualquer corte — o limite default de trace no
+   * GitLab é 100 MB, ou ~200 MB em UTF-16 dentro do processo. Com o teto, o
+   * corpo é lido em streaming e só a cauda fica em memória.
+   */
+  maxTextChars?: number;
 }
 
 function buildUrl(path: string, query?: RequestOptions['query']): string {
@@ -110,11 +119,14 @@ function toGitLabError(status: number, raw: string, resource: string): GitLabErr
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-async function once(url: string, opts: RequestOptions): Promise<Response> {
+/** O que a chamada aceita de volta. Só isso difere entre gl() e glText(). */
+type Accept = 'application/json' | 'text/plain';
+
+async function once(url: string, opts: RequestOptions, accept: Accept): Promise<Response> {
   const cfg = getConfig();
   const headers: Record<string, string> = {
     'PRIVATE-TOKEN': cfg.token,
-    Accept: 'application/json',
+    Accept: accept,
   };
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
 
@@ -126,20 +138,27 @@ async function once(url: string, opts: RequestOptions): Promise<Response> {
   });
 }
 
-/** Uma chamada à API v4. Lança GitLabError já traduzido. */
-export async function gl<T>(path: string, opts: RequestOptions = {}): Promise<GitLabResponse<T>> {
+/**
+ * Núcleo compartilhado: url, header, timeout, retry único de 429 e tradução de
+ * erro. Devolve a Response já garantidamente ok — quem chama só decide como ler
+ * o corpo. Existir uma vez só é o que impede gl() e glText() de divergirem.
+ */
+async function request(path: string, opts: RequestOptions, accept: Accept): Promise<Response> {
   const cfg = getConfig();
   const resource = opts.resource ?? path;
   const url = buildUrl(path, opts.query);
 
-  let res: Response;
-  try {
-    res = await once(url, opts);
-  } catch (e) {
+  /**
+   * Traduz falha de rede/timeout. Toda ida à rede passa por aqui — inclusive a
+   * segunda tentativa do 429 e a leitura do corpo. Deixar qualquer uma de fora
+   * faz um DOMException cru chegar ao modelo, sem citar GITLAB_TIMEOUT_MS,
+   * GITLAB_URL nem GITLAB_CA_CERT.
+   */
+  const translate = (e: unknown): never => {
     const name = e instanceof Error ? e.name : '';
     if (name === 'TimeoutError' || name === 'AbortError') {
       throw new GitLabError(
-        `Timeout de ${cfg.timeoutMs}ms falando com ${cfg.url} (${resource}). Aumente GITLAB_TIMEOUT_MS ou verifique rede/VPN.`,
+        `Timeout de ${cfg.timeoutMs}ms falando com ${cfg.url} (${resource}). Aumente GITLAB_TIMEOUT_MS ou verifique rede/VPN. Se o corpo for grande, reduza max_lines.`,
         0,
       );
     }
@@ -148,23 +167,134 @@ export async function gl<T>(path: string, opts: RequestOptions = {}): Promise<Gi
       `Não consegui falar com ${cfg.url} (${resource}): ${detail}. Verifique GITLAB_URL, rede/VPN e GITLAB_CA_CERT se o cert for privado.`,
       0,
     );
-  }
+  };
+
+  const attempt = async (): Promise<Response> => {
+    try {
+      return await once(url, opts, accept);
+    } catch (e) {
+      return translate(e);
+    }
+  };
+
+  let res = await attempt();
 
   // 429: respeita Retry-After, tenta uma vez, depois desiste.
   if (res.status === 429) {
     const retryAfter = Number(res.headers.get('retry-after') ?? '');
     const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 60) * 1000 : 5000;
     log(`429 em ${resource}; aguardando ${waitMs}ms e tentando uma vez.`);
+    // Descarta o corpo antes de dormir. Sem isto o undici segura o socket e o
+    // buffer da resposta abandonada até o GC — num burst de rate limit, um
+    // socket preso por 429, cada um por até 60s.
+    await res.body?.cancel().catch(() => undefined);
     await sleep(waitMs);
-    res = await once(url, opts);
+    res = await attempt();
   }
 
   if (!res.ok) {
-    const raw = await res.text().catch(() => '');
+    // Teto pequeno e incondicional: a mensagem corta em 500 chars de qualquer
+    // forma, e um 502 de proxy na frente do trace de 100 MB não pode
+    // materializar o corpo inteiro só para virar texto de erro.
+    const raw = await readBoundedText(res, ERROR_BODY_CHARS).catch(() => '');
     throw toGitLabError(res.status, raw, resource);
   }
 
-  const text = await res.text();
+  return res;
+}
+
+/**
+ * Lê o corpo com a mesma tradução de erro. O AbortSignal do timeout continua
+ * armado enquanto o corpo baixa: um trace grande em VPN lenta devolve 200 OK e
+ * só então falha aqui.
+ */
+/** Teto do corpo de resposta de erro. A mensagem corta em 500 chars mesmo. */
+const ERROR_BODY_CHARS = 4_000;
+
+/**
+ * Lê no máximo `max` caracteres, guardando a cauda, em streaming. Nunca
+ * materializa o corpo inteiro.
+ */
+async function readBoundedText(res: Response, max: number): Promise<string> {
+  const stream = res.body;
+  if (stream === null) return '';
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let acc = '';
+  let dropped = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    acc += decoder.decode(value, { stream: true });
+    if (acc.length > max * 2) {
+      dropped += acc.length - max;
+      acc = keepTail(acc, max);
+    }
+  }
+  acc += decoder.decode();
+  if (acc.length > max) {
+    dropped += acc.length - max;
+    acc = keepTail(acc, max);
+  }
+  boundedDropped.set(res, dropped);
+  return acc;
+}
+
+/**
+ * Cauda de `max` chars sem partir par surrogate. `slice(-max)` podia cair no
+ * meio de um par e deixar meio caractere, que o decoder mostra como \ufffd.
+ */
+function keepTail(s: string, max: number): string {
+  const out = s.slice(-max);
+  const first = out.charCodeAt(0);
+  // 0xDC00-0xDFFF é low surrogate: se é o primeiro char, o par foi partido.
+  return first >= 0xdc00 && first <= 0xdfff ? out.slice(1) : out;
+}
+
+/** Quanto `readBoundedText` descartou, por resposta. */
+const boundedDropped = new WeakMap<Response, number>();
+
+async function readBody(
+  res: Response,
+  path: string,
+  opts: RequestOptions,
+): Promise<{ text: string; droppedChars: number }> {
+  const cfg = getConfig();
+  const resource = opts.resource ?? path;
+  try {
+    const max = opts.maxTextChars;
+    if (max === undefined) return { text: await res.text(), droppedChars: 0 };
+    // Streaming com cauda rolante: o pico fica em ~2x o teto, não no tamanho
+    // do corpo.
+    const text = await readBoundedText(res, max);
+    return { text, droppedChars: boundedDropped.get(res) ?? 0 };
+  } catch (e) {
+    const name = e instanceof Error ? e.name : '';
+    if (name === 'TimeoutError' || name === 'AbortError') {
+      throw new GitLabError(
+        `Timeout de ${cfg.timeoutMs}ms baixando a resposta de ${resource}. Aumente GITLAB_TIMEOUT_MS, verifique rede/VPN, ou peça menos dados (max_lines menor).`,
+        0,
+      );
+    }
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new GitLabError(`Falha lendo a resposta de ${resource}: ${detail}.`, 0);
+  }
+}
+
+/** Uma chamada à API v4. Lança GitLabError já traduzido. */
+export async function gl<T>(path: string, opts: RequestOptions = {}): Promise<GitLabResponse<T>> {
+  const res = await request(path, opts, 'application/json');
+  const { text } = await readBody(res, path, opts);
   const data = (text ? JSON.parse(text) : null) as T;
   return { data, page: readPage(res.headers) };
+}
+
+/**
+ * Mesma requisição, mesmo tratamento de erro, mesmo retry — corpo devolvido
+ * cru, sem parse. Para endpoint que não responde JSON: hoje, trace de job.
+ */
+export async function glText(path: string, opts: RequestOptions = {}): Promise<GitLabResponse<string>> {
+  const res = await request(path, opts, 'text/plain');
+  const { text, droppedChars } = await readBody(res, path, opts);
+  return { data: text, page: readPage(res.headers), droppedChars };
 }
