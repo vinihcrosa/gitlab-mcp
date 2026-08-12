@@ -1,0 +1,49 @@
+# Publica no npm via trusted publishing (OIDC). Sem NPM_TOKEN, sem OTP.
+#
+# Pre-requisito, feito uma vez em npmjs.com:
+#   @vinihcrosa/gitlab-mcp -> Settings -> Trusted publishing -> GitHub Actions
+#     Organization or user: vinihcrosa
+#     Repository:           gitlab-mcp
+#     Workflow filename:    publish.yml
+#
+# O npm so deixa configurar isso depois que o pacote existe no registry, entao
+# o primeiro publish tem que sair por outro caminho (token com Bypass 2FA ou OTP).
+#
+# Disparo: criar uma release/tag no GitHub, ou rodar na mao pela aba Actions.
+
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write # exigido pelo OIDC do trusted publishing
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # trusted publishing exige Node >= 22.14 e npm >= 11.5.1
+          node-version: '22.14'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Garante npm >= 11.5.1
+        run: npm install -g npm@latest
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - run: npm test
+
+      # Sem NPM_TOKEN: o npm detecta o ambiente OIDC e se autentica sozinho.
+      - name: Publish
+        run: npm publish

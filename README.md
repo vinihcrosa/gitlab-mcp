@@ -1,4 +1,4 @@
-# gitlab-mcp
+# @vinihcrosa/gitlab-mcp
 
 MCP server (stdio) que funciona como proxy fino sobre a **REST API v4** de uma instância **GitLab CE self-hosted**.
 
@@ -14,12 +14,27 @@ MVP com um objetivo só: **navegar merge requests e deixar review inline sem abr
 
 ## Instalação
 
+Não precisa instalar nada: o client MCP executa o pacote via `npx` e o npm cuida do download.
+
 ```bash
-npm install
-npm run build
+npx -y @vinihcrosa/gitlab-mcp
 ```
 
+Rodar esse comando na mão só serve para conferir que sobe — ele fica esperando o protocolo em stdin. A configuração de verdade está em [Configuração no client](#configuração-no-client).
+
 Requer Node >= 20 (usa `fetch` nativo e `AbortSignal.timeout`).
+
+### A partir do código-fonte
+
+Para desenvolver ou rodar um fork:
+
+```bash
+git clone https://github.com/vinihcrosa/gitlab-mcp.git
+cd gitlab-mcp
+npm install     # o script `prepare` já compila
+```
+
+O client passa a apontar para `dist/index.js` com caminho absoluto, em vez de `npx`.
 
 ## Configuração
 
@@ -46,14 +61,30 @@ Veja `.env.example`.
 
 ## Configuração no client
 
-`claude_desktop_config.json` ou `.mcp.json`:
+MCP stdio não é daemon: você não sobe o servidor, você registra um comando. O client executa esse comando, conversa por stdin/stdout e mata o processo ao fim da sessão.
+
+### Claude Code
+
+```bash
+claude mcp add gitlab -s user \
+  -e GITLAB_URL=https://gitlab.empresa.com \
+  -e GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx \
+  -e GITLAB_READ_ONLY=true \
+  -- npx -y @vinihcrosa/gitlab-mcp
+```
+
+`-s user` vale em todos os projetos. Use `-s project` só se aceitar que o arquivo `.mcp.json` gerado é commitável — e aí **não** coloque o token nele.
+
+### Claude Desktop
+
+`claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "gitlab": {
-      "command": "node",
-      "args": ["/caminho/absoluto/para/gitlab-mcp/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@vinihcrosa/gitlab-mcp"],
       "env": {
         "GITLAB_URL": "https://gitlab.empresa.com",
         "GITLAB_TOKEN": "glpat-xxxxxxxxxxxxxxxxxxxx",
@@ -63,6 +94,8 @@ Veja `.env.example`.
   }
 }
 ```
+
+Rodando a partir do código-fonte, troque `command`/`args` por `"command": "node"` e `"args": ["/caminho/absoluto/para/gitlab-mcp/dist/index.js"]`.
 
 Para habilitar review inline, troque para `"GITLAB_READ_ONLY": "false"` (e use um token com escopo `api`).
 

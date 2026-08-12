@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "budgets": {
+    "injectionBytes": 4096,
+    "files": {
+      "project": {
+        "lines": 150,
+        "bytes": 12288
+      },
+      "correction": {
+        "lines": 100,
+        "bytes": 8192
+      },
+      "preference": {
+        "lines": 60,
+        "bytes": 4096
+      }
+    }
+  },
+  "gate": {
+    "minSignals": 5,
+    "minDurationMin": 3,
+    "minHoursBetween": 6,
+    "lockTtlMin": 30
+  },
+  "consolidation": {
+    "enabled": true,
+    "runtime": "auto"
+  },
+  "harnesses": {
+    "claude-code": {
+      "minVersion": "2.1.224",
+      "installMode": "symlink",
+      "scope": "project"
+    },
+    "codex": {
+      "minVersion": "0.147.0",
+      "installMode": "symlink",
+      "scope": "project"
+    }
+  },
+  "heuristics": {
+    "correctionMarkers": [
+      "na verdade",
+      "não, faz",
+      "nao, faz",
+      "sempre que",
+      "nunca",
+      "actually",
+      "no, do",
+      "always",
+      "never",
+      "não use",
+      "nao use",
+      "don't use",
+      "do not use"
+    ]
+  }
+}

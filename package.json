@@ -1,15 +1,37 @@
 {
-  "name": "gitlab-mcp",
+  "name": "@vinihcrosa/gitlab-mcp",
   "version": "0.1.0",
-  "private": true,
   "description": "MCP server (stdio) — proxy fino sobre a REST API v4 de um GitLab CE self-hosted, focado em navegar MRs e deixar review inline.",
   "type": "module",
   "bin": {
     "gitlab-mcp": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    ".env.example"
   ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "gitlab",
+    "merge-request",
+    "code-review",
+    "claude"
+  ],
+  "homepage": "https://github.com/vinihcrosa/gitlab-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vinihcrosa/gitlab-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vinihcrosa/gitlab-mcp/issues"
+  },
+  "author": "vinihcrosa",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20"
   },
@@ -18,7 +40,9 @@
     "start": "node dist/index.js",
     "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0",

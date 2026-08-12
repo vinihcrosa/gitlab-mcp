@@ -3,3 +3,10 @@ dist/
 .env
 *.log
 .DS_Store
+
+# Config de ferramenta local: os hooks gravam caminho absoluto da máquina
+# (/Users/<user>/...), que quebra em qualquer outro clone.
+.agents/
+.claude/
+.codex/
+.compozy/
