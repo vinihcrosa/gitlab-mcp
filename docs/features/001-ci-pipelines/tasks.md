@@ -203,7 +203,7 @@ the argument schema. That is the intended sequence, not a loose end.
 
 ## T3 — Projection, availability and rendering
 
-- [ ] T3 — Projection, availability and rendering
+- [x] T3 — Projection, availability and rendering
 
 ### Overview
 
@@ -228,13 +228,13 @@ T2.
 
 ### Subtasks
 
-- [ ] `PipelineView` / `JobView` types and their projections
-- [ ] `newest` selection by id
-- [ ] `logAvailability` with its pinned precedence
-- [ ] `renderPipeline`, including the failed-job block
-- [ ] `renderPipelineList` with the page block and the empty case
-- [ ] `renderJobLog` with untrusted wrapping and the empty-trace case
-- [ ] The 20 cases
+- [x] `PipelineView` / `JobView` types and their projections
+- [x] `newest` selection by id
+- [x] `logAvailability` with its pinned precedence
+- [x] `renderPipeline`, including the failed-job block
+- [x] `renderPipelineList` with the page block and the empty case
+- [x] `renderJobLog` with untrusted wrapping and the empty-trace case
+- [x] The 20 cases
 
 ### Files
 
@@ -255,6 +255,52 @@ present-and-undefined, which is the difference between a whitelist and a copy.
 
 All 20 cases pass. `npx tsc --noEmit` clean. `src/pipelines.ts` imports nothing
 from `gitlab.ts`.
+
+### Completion notes
+
+**Evidence.**
+
+```
+$ npm test
+ ✓ test/diff.test.ts (15 tests) 5ms
+ ✓ test/pipelines.test.ts (20 tests) 4ms
+ ✓ test/trace.test.ts (21 tests) 17ms
+ Test Files  3 passed (3)
+      Tests  56 passed (56)
+$ npx tsc --noEmit
+exit 0
+```
+
+`src/pipelines.ts` imports exactly one module, `./format.js`, which the design's
+boundary rule permits. No import of `gitlab.ts` — invariant 4 holds.
+
+**Conflict resolved.** `tdd.md` §Interfaces declares `RawPipeline` and `RawJob`
+under the `src/tools/pipelines.ts` heading, but `newest` and `logAvailability`
+consume them and live in `src/pipelines.ts`. Placing the types with the tools
+would force the pure module to import the I/O module. Invariant 4 outranks the
+document's layout, so the types live in `src/pipelines.ts` and the tool module
+imports them. Rung 2 of the precedence order: a numbered invariant beats prose
+placement in the same file.
+
+**Defects caught — one, and it was in the test.** UT-34 failed on first run. The
+assertion `expect(out).not.toMatch(/test.*duração=\d/)` was meant to prove the
+running job gets no invented duration, but `test` also matches the *stage* name
+in the finished job's line, so it fired on correct output. Rewritten to locate
+the running job's line by its id and assert on that line alone. The fixture also
+carried `failure_reason` onto jobs that had not failed, which made the rendered
+output misleading while reading it; the helper now builds from the raw shape so
+`failure_reason: undefined` genuinely disappears through `pick`.
+
+Worth stating plainly: the code was right and the case was wrong. A case that
+fails for the wrong reason is as expensive as one that passes for the wrong
+reason, and this one was caught only because the failure output was read rather
+than the assertion re-run.
+
+**Outside the declared files.** Nothing.
+
+**Follow-ups.** The messages for `never-started` and `erased` are composed in T4,
+not here, so they are not unit-covered. That follows the declared exclusion for
+the tool layer and is noted rather than silently accepted.
 
 ---
 
