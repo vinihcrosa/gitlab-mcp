@@ -1,7 +1,7 @@
 # Tasks — 001 CI / Pipelines
 
 **Derived from:** `tdd.md`, `tests.md`
-**Status:** draft, awaiting execution
+**Status:** executed
 
 Task numbering matches the "Written by" column of `tdd.md` §Layout. T1, T2 and
 T3 have no dependencies and can run in parallel; T4 joins them.
@@ -456,7 +456,7 @@ it, but worth naming since the smoke script had to learn it the hard way.
 
 ## T5 — README and AGENTS.md
 
-- [ ] T5 — README and AGENTS.md
+- [x] T5 — README and AGENTS.md
 
 ### Overview
 
@@ -474,11 +474,11 @@ claims are false. One slice because it is one domain and one reviewer.
 
 ### Subtasks
 
-- [ ] Scope statement in both files
-- [ ] Tool counts, all four sites
-- [ ] Tool inventory rows for the three new tools
-- [ ] Token scope table row
-- [ ] Cross-check that no other count or scope claim was missed
+- [x] Scope statement in both files
+- [x] Tool counts, all four sites
+- [x] Tool inventory rows for the three new tools
+- [x] Token scope table row
+- [x] Cross-check that no other count or scope claim was missed
 
 ### Files
 
@@ -498,3 +498,40 @@ wrong, and it is checked by reading `prd.md`'s assumptions table.
 `grep -n "10 tools\|dez tools" README.md AGENTS.md` returns nothing. The scope
 sentence in both files names CI as readable and not writable. The scope table has
 a row for each new tool.
+
+### Completion notes
+
+**Evidence.**
+
+```
+$ grep -rn "10 tools|dez tools|única lógica pura|único arquivo de teste" README.md AGENTS.md
+(no matches)
+$ npm test
+ Test Files  4 passed (4)
+      Tests  62 passed (62)
+```
+
+**The cross-check subtask earned its place.** The four count sites named in the
+task body were the ones already known. The sweep found three more claims that had
+gone stale and that nobody had listed:
+
+1. `AGENTS.md:48` — "ordem de registro das 10 tools", inside the repository tree.
+2. `AGENTS.md:81` — "o único arquivo de teste existente é `test/diff.test.ts` … a
+   única lógica pura do projeto". Both halves false after T2 and T3.
+3. `README.md:198` — the same claim in different words.
+
+A task that had only ticked its four known sites would have passed its own
+success criteria and left the guide lying about the codebase in three places.
+
+**Scope decision.** `get_job_log` is documented as requiring `api`, with the
+sentence stating plainly that this is precaution and not measurement — the
+`read_api` probe still has not run. Requirement 5 forbade claiming otherwise, and
+the honest phrasing is what lets a future reader flip the row with a token and no
+code change.
+
+**Outside the declared files.** Nothing — the three extra sites are inside
+`README.md` and `AGENTS.md`.
+
+**Follow-ups.** The `read_api` probe against `/jobs/:id/trace` remains open. It
+needs a token this session did not hold, and it is the only thing standing
+between the scope table and being measured rather than assumed.

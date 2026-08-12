@@ -2,11 +2,11 @@
 
 MCP server (stdio) que funciona como proxy fino sobre a **REST API v4** de uma instância **GitLab CE self-hosted**.
 
-MVP com um objetivo só: **navegar merge requests e deixar review inline sem abrir o browser.** Tudo que não serve a isso está fora de escopo (nada de issues, pipelines, criar/mergear MR, aprovações, recursos Premium/Ultimate).
+MVP com um objetivo só: **navegar merge requests e deixar review inline sem abrir o browser.** Ler o estado da CI faz parte disso — pipeline vermelha é justamente o momento em que o review para. Escrever em CI não faz: nada dispara, cancela ou re-roda pipeline, e nada lê variável ou secret. Fora de escopo também: issues, criar/mergear MR, aprovações, recursos Premium/Ultimate.
 
 ## Como funciona
 
-- 10 tools: 7 de leitura, 3 de escrita.
+- 13 tools: 10 de leitura, 3 de escrita.
 - Toda resposta passa por **whitelist explícita de campos** — a API do GitLab devolve objetos com 40+ campos e nenhum deles chega cru no contexto do modelo.
 - Toda listagem tem `per_page` com default 20 (máximo 100) e informa se há mais páginas.
 - **Read-only por default.** As tools de escrita só funcionam com `GITLAB_READ_ONLY=false`.
@@ -55,7 +55,11 @@ Veja `.env.example`.
 | Tools | Escopo mínimo |
 |---|---|
 | 1–7 (`whoami`, `list_my_projects`, `list_my_authored_mrs`, `list_mrs_awaiting_my_review`, `get_mr`, `get_mr_diff`, `list_mr_discussions`) | `read_api` |
+| 11, 13 (`get_mr_pipeline`, `list_pipelines`) | `read_api` |
+| 12 (`get_job_log`) | **`api`** — ver nota abaixo |
 | 8–10 (`comment_on_mr`, `comment_on_mr_line`, `reply_to_mr_discussion`) | **`api`** |
+
+`get_job_log` pede `api` por precaução, não por medida: **não foi verificado** se `read_api` alcança `/jobs/:id/trace`. Se você testar com um token `read_api` e funcionar, esta linha da tabela muda e nenhum código muda junto.
 
 `read_api` **não** escreve. Se você gerar o token com `read_api` e tentar comentar, o GitLab devolve **403** — o server traduz isso para uma mensagem dizendo exatamente que provavelmente é esse o caso, mas o conserto é regerar o token com escopo `api`.
 
@@ -133,7 +137,7 @@ GITLAB_TOKEN=glpat-xxx \
 npx @modelcontextprotocol/inspector node dist/index.js
 ```
 
-O Inspector abre no browser, lista as 10 tools e deixa você chamar cada uma com os argumentos na mão. Se algo falhar aqui, falha no client também — e aqui você vê a mensagem de erro inteira.
+O Inspector abre no browser, lista as 13 tools e deixa você chamar cada uma com os argumentos na mão. Se algo falhar aqui, falha no client também — e aqui você vê a mensagem de erro inteira.
 
 Logs do server saem em **stderr** (aba de logs do Inspector). stdout é exclusivo do protocolo MCP.
 
@@ -157,7 +161,7 @@ Nesta ordem. Cada passo alimenta o seguinte.
 
 Se o passo 7 ou 8 falhar, a mensagem de erro diz quais linhas *de fato* existem naquele lado do diff. Não é preciso adivinhar.
 
-## As 10 tools
+## As 13 tools
 
 | # | Tool | Escrita | Resumo |
 |---|---|---|---|
@@ -171,6 +175,9 @@ Se o passo 7 ou 8 falhar, a mensagem de erro diz quais linhas *de fato* existem 
 | 8 | `comment_on_mr` | sim | Comentário geral no MR. |
 | 9 | `comment_on_mr_line` | sim | Thread ancorada numa linha do diff. |
 | 10 | `reply_to_mr_discussion` | sim | Resposta numa thread existente. |
+| 11 | `get_mr_pipeline` | | Pipeline mais recente do MR e seus jobs. Nomeia o que falhou. |
+| 12 | `get_job_log` | | Log do job, limpo e cortado pelo fim. |
+| 13 | `list_pipelines` | | Pipelines do projeto, com filtro de branch e status. |
 
 ### Notas de implementação que importam
 
@@ -188,9 +195,14 @@ Se o passo 7 ou 8 falhar, a mensagem de erro diz quais linhas *de fato* existem 
 npm test
 ```
 
-Cobrem só o parser de diff unificado (`src/diff.ts`) — a única lógica pura não-trivial, e a que quebra `comment_on_mr_line` quando erra: hunk misto, múltiplos hunks, arquivo novo/deletado/renomeado, `\ No newline at end of file`, truncamento em 400 linhas e arquivo binário.
+62 casos, todos offline. Cobrem a lógica pura — onde saída errada parece plausível:
 
-Sem testes de integração e sem mock de HTTP — não vale o tempo no MVP.
+- **`src/diff.ts`** — hunk misto, múltiplos hunks, arquivo novo/deletado/renomeado, `\ No newline at end of file`, truncamento em 400 linhas, binário. É o que quebra `comment_on_mr_line` quando erra.
+- **`src/trace.ts`** — ANSI (CSI e OSC), marcador de seção, prefixo de timestamp e de stream, colapso de barra de progresso, corte pela cauda em limite de linha.
+- **`src/pipelines.ts`** — whitelist de campos, escolha da pipeline mais recente, precedência entre "nunca começou" e "log apagado", envelope `<untrusted>`.
+- **`src/tools/index.ts`** — a superfície registrada é exatamente 13 tools, o que pega tanto tool nova que não registrou quanto tool existente derrubada por engano.
+
+Sem testes de integração e sem mock de HTTP: a camada de I/O não tem cobertura, e o que isso deixa de fora está declarado em `docs/features/001-ci-pipelines/tests.md` em vez de subentendido.
 
 ## Estrutura
 
@@ -202,6 +214,8 @@ src/
 ├── errors.ts      # GitLabError / ToolError
 ├── projects.ts    # resolveProject + cache path <-> id
 ├── diff.ts        # parser de diff unificado (puro, testado)
+├── trace.ts       # limpeza e corte pela cauda de log de job (puro, testado)
+├── pipelines.ts   # projeção, decisão e renderização de CI (puro, testado)
 ├── format.ts      # whitelist, truncamento, blocos <untrusted>
-└── tools/         # as 10 tools, agrupadas por domínio
+└── tools/         # as 13 tools, agrupadas por domínio
 ```

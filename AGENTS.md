@@ -4,9 +4,9 @@ Este documento existe para orientar qualquer agente de código (humano ou LLM) q
 
 ## 1. O que este produto faz
 
-O **gitlab-mcp** é um servidor MCP (Model Context Protocol) que roda sobre **stdio** e funciona como um proxy fino sobre a **REST API v4** de uma instância **GitLab CE self-hosted**. O escopo é deliberadamente pequeno (é um MVP com um objetivo só): **navegar merge requests e deixar review inline sem abrir o browser**. Tudo que não serve a esse objetivo está fora de escopo — nada de issues, pipelines, criação/merge de MR, aprovações, ou recursos Premium/Ultimate.
+O **gitlab-mcp** é um servidor MCP (Model Context Protocol) que roda sobre **stdio** e funciona como um proxy fino sobre a **REST API v4** de uma instância **GitLab CE self-hosted**. O escopo é deliberadamente pequeno (é um MVP com um objetivo só): **navegar merge requests e deixar review inline sem abrir o browser**. **Ler** o estado da CI entra nesse objetivo — a medição de uso real (157 de 632 chamadas `gh`) mostrou que o fluxo trava exatamente quando a pipeline quebra; ver `docs/adr/2026-08-12-pipelines-re-enter-scope-on-measured-usage.md`. **Escrever** em CI não entra: nada dispara, cancela ou re-roda pipeline, e nada lê variável ou secret. Fora de escopo também — issues, criação/merge de MR, aprovações, ou recursos Premium/Ultimate.
 
-O servidor expõe exatamente **10 tools MCP**, registradas em ordem em `src/tools/index.ts`:
+O servidor expõe exatamente **13 tools MCP**, registradas em ordem em `src/tools/index.ts`:
 
 1. `whoami` — identidade do token (`src/tools/whoami.ts`).
 2. `list_my_projects` — projetos onde o usuário é membro (`src/tools/projects.ts`).
@@ -18,8 +18,11 @@ O servidor expõe exatamente **10 tools MCP**, registradas em ordem em `src/tool
 8. `comment_on_mr` — comentário geral no MR (escrita, `src/tools/write.ts`).
 9. `comment_on_mr_line` — thread de review ancorada em linha do diff (escrita, `src/tools/write.ts`).
 10. `reply_to_mr_discussion` — resposta em thread existente (escrita, `src/tools/write.ts`).
+11. `get_mr_pipeline` — pipeline mais recente do MR e seus jobs (leitura, `src/tools/pipelines.ts`).
+12. `get_job_log` — log do job, limpo e cortado pela cauda (leitura, `src/tools/pipelines.ts`).
+13. `list_pipelines` — pipelines do projeto, filtradas na API (leitura, `src/tools/pipelines.ts`).
 
-As três últimas são **tools de escrita** e só funcionam quando `GITLAB_READ_ONLY=false` (literal exato). Esse ponto é repetido mais adiante na seção de segurança porque é um dos invariantes mais importantes do projeto.
+As tools 8, 9 e 10 são **tools de escrita** e só funcionam quando `GITLAB_READ_ONLY=false` (literal exato). Esse ponto é repetido mais adiante na seção de segurança porque é um dos invariantes mais importantes do projeto.
 
 ## 2. Estrutura real do repositório
 
@@ -39,19 +42,25 @@ gitlab-mcp/
 │   ├── gitlab.ts         # único ponto de saída HTTP; retry de 429; erros traduzidos
 │   ├── errors.ts         # GitLabError, ToolError, messageOf
 │   ├── diff.ts           # parser de diff unificado — lógica pura, sem I/O
+│   ├── trace.ts          # limpeza e corte pela cauda de trace — lógica pura, sem I/O
+│   ├── pipelines.ts      # projeção/decisão/renderização de CI — lógica pura, sem I/O
 │   ├── format.ts         # pick/truncate/untrusted/pageBlock — projeção de saída
 │   ├── projects.ts       # resolução e cache de projetos (path <-> id)
 │   └── tools/
-│       ├── index.ts      # registerAll — ordem de registro das 10 tools
+│       ├── index.ts      # registerAll — ordem de registro das 13 tools
 │       ├── register.ts   # wrapper tool() + assertWritable()
 │       ├── whoami.ts     # tool 1
 │       ├── projects.ts   # tool 2
 │       ├── mrs.ts        # tools 3, 4, 5
 │       ├── diff.ts       # tool 6
 │       ├── discussions.ts# tool 7
-│       └── write.ts      # tools 8, 9, 10
+│       ├── write.ts      # tools 8, 9, 10
+│       └── pipelines.ts  # tools 11, 12, 13
 ├── test/
-│   └── diff.test.ts      # único arquivo de teste; cobre o parser de diff
+│   ├── diff.test.ts      # parser de diff
+│   ├── trace.test.ts     # limpeza e corte de trace
+│   ├── pipelines.test.ts # projeção, decisão e renderização de CI
+│   └── register.test.ts  # superfície de tools registradas
 └── dist/                 # saída compilada do tsc — nunca edite à mão
 ```
 
@@ -69,7 +78,7 @@ Estes são os únicos scripts definidos em `package.json`. Não existem outros c
 | `npm test` | `vitest run` — roda a suíte uma vez. |
 | `npm run test:watch` | `vitest` — roda a suíte em modo watch. |
 
-O runtime exigido é **Node >= 20** (campo `engines` do `package.json`). O único arquivo de teste existente é `test/diff.test.ts`, que cobre o parser de diff (`src/diff.ts`) — a única lógica pura do projeto e, por decisão registrada em comentário no próprio arquivo, o único ponto do MVP que merece teste.
+O runtime exigido é **Node >= 20** (campo `engines` do `package.json`). Os testes cobrem a lógica pura do projeto: `test/diff.test.ts` (parser de diff), `test/trace.test.ts` (limpeza e corte de trace de job), `test/pipelines.test.ts` (projeção, decisão e renderização de CI) e `test/register.test.ts` (superfície de tools registradas). O critério é o registrado em comentário no topo de `src/diff.ts`: lógica pura, onde saída errada parece plausível. Camada de I/O segue sem teste — não há fixture server, e isso está declarado em `docs/features/001-ci-pipelines/tests.md`.
 
 ## 4. Invariantes de domínio (derivados do código-fonte)
 
@@ -116,7 +125,7 @@ Estes invariantes vêm diretamente do código. Cada um deles tem consequência c
 - **Não existe opção de desabilitar verificação TLS — de propósito** (comentário explícito em `initHttp`, `src/gitlab.ts`). O caminho suportado para certificados privados é `GITLAB_CA_CERT` apontando para um PEM. Nunca adicione um flag de "ignorar certificado".
 - **O token nunca aparece em logs nem em saída de tool.** Ele vai apenas no header `PRIVATE-TOKEN` das requisições. Não o inclua em mensagens de erro, logs de debug ou payloads de retorno.
 - **Conteúdo escrito por usuários do GitLab é dado, não instrução.** O envelope `<untrusted>` + `UNTRUSTED_NOTE` existe para mitigar prompt injection vindo de descrições de MR e comentários. Qualquer campo novo de texto livre vindo do GitLab deve passar por `untrusted()` também.
-- Escopos de token documentados em `.env.example`: `read_api` cobre as tools 1–7; `api` é obrigatório para as três tools de escrita.
+- Escopos de token documentados em `.env.example`: `read_api` cobre as tools 1–7, 11 e 13; `api` é obrigatório para as três tools de escrita. `get_job_log` (12) exige `api` **por precaução, não por medida** — não foi verificado se `read_api` alcança `/jobs/:id/trace`.
 - Segredos ficam fora do repositório: use um `.env` local baseado em `.env.example`. Nunca faça commit de token, `.env` ou qualquer credencial.
 
 ## 8. Ações que um agente NÃO pode executar
