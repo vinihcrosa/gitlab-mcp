@@ -50,6 +50,23 @@ describe('4. cleanTrace — timestamp', () => {
     const line = 'failed at 2026-08-12T03:37:08Z during step';
     expect(cleanTrace(line)).toEqual([line]);
   });
+
+  // Byte real, colhido de /projects/944/jobs/15965/trace. Os 41 casos
+  // sintéticos não pegavam: foram escritos a partir do requisito que já tinha
+  // perdido a palavra "stream" na tradução do spec.md original.
+  it('UT-46 marcador de stream colado no timestamp sai junto', () => {
+    expect(cleanTrace(`2026-08-10T18:52:31.340190Z 00O ${ESC}[31;1mERROR: Job failed${ESC}[0;m`)).toEqual([
+      'ERROR: Job failed',
+    ]);
+    expect(cleanTrace('2026-08-10T18:52:30.272008Z 00O+WARNING: timeout')).toEqual(['WARNING: timeout']);
+    expect(cleanTrace('2026-08-10T18:52:30.272008Z 01O Time Elapsed 00:12:41.06')).toEqual([
+      'Time Elapsed 00:12:41.06',
+    ]);
+  });
+
+  it('UT-47 marcador de stream sem timestamp na frente é conteúdo, e fica', () => {
+    expect(cleanTrace('00O nao e prefixo aqui')).toEqual(['00O nao e prefixo aqui']);
+  });
 });
 
 describe('5. cleanTrace — linhas em branco', () => {

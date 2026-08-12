@@ -79,7 +79,7 @@ them a debugging session.
 
 | ID | Requirement |
 |---|---|
-| LOG-01 | The job log response SHALL remove terminal colour codes, collapsible-section markers, and per-line timestamp prefixes from the trace before returning it. |
+| LOG-01 | The job log response SHALL remove terminal colour codes, collapsible-section markers, and per-line timestamp and stream prefixes from the trace before returning it. |
 | LOG-02 | IF the cleaned trace exceeds the line ceiling THEN the response SHALL return the final lines up to that ceiling and SHALL state how many earlier lines were dropped. |
 | LOG-03 | Truncation SHALL cut between lines and never within one. |
 | LOG-04 | The line ceiling SHALL default to 400 and SHALL be overridable per call. |

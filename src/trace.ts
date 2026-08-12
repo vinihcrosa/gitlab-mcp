@@ -23,8 +23,15 @@ const ANSI_CSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const ANSI_OSC = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 // Marcador de seção do GitLab. O nome é sempre identificador, nunca texto livre.
 const SECTION = /section_(?:start|end):\d+:[A-Za-z0-9_.-]+/g;
-// Timestamp ISO-8601 apenas no começo da linha, com o espaço que o separa.
-const LEADING_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?[ \t]?/;
+// Prefixo de linha do GitLab: timestamp ISO-8601 e, opcionalmente, o marcador
+// de stream que vem colado nele — `00O `, `01O `, `00O+` (dois dígitos de
+// profundidade de seção, O/E para stdout/stderr, `+` para continuação).
+//
+// O marcador só é removido quando SEGUE um timestamp. Sozinho ele é ambíguo
+// demais: `00O` pode ser conteúdo real de log, e comer conteúdo é pior falha
+// que deixar prefixo visível.
+const LEADING_PREFIX =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?(?:[ \t]+\d{2}[OE][+ ]?)?[ \t]?/;
 
 /**
  * Aplica o contrato de limpeza. A ordem é o contrato, não detalhe: marcador de
@@ -44,8 +51,8 @@ export function cleanTrace(raw: string): string[] {
     // 5. Barra de progresso: só o estado final da linha sobrevive.
     const lastCr = out.lastIndexOf('\r');
     if (lastCr !== -1) out = out.slice(lastCr + 1);
-    // 6. Timestamp, só quando a linha inteira começa com um.
-    return out.replace(LEADING_TIMESTAMP, '');
+    // 6. Timestamp e marcador de stream, só quando a linha começa com eles.
+    return out.replace(LEADING_PREFIX, '');
   });
 
   // 7. Linhas vazias do fim somem; as do meio são estrutura e ficam.

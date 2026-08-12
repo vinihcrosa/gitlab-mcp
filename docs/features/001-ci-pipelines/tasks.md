@@ -199,6 +199,25 @@ comparison would have passed on an off-by-one that still split a line.
 **Follow-ups.** `MAX_TRACE_LINES` is exported and unused until T4 wires it into
 the argument schema. That is the intended sequence, not a loose end.
 
+**Addendum, found during T4's manual verification.** The first real call against
+job 15965 returned lines prefixed `00O `, `01O `, `00O+`. Those are GitLab's
+stream markers — two digits of section depth, `O`/`E` for the stream, `+` for a
+continuation — and they sit between the timestamp and the content.
+
+The requirement had named them. `spec.md`, before this feature was converted to
+the lumem layout, read *"prefixo de timestamp/stream removido de cada linha"*.
+The English PRD written during that conversion said only "timestamp prefix". The
+word was lost in translation, and every one of the 21 synthetic cases was written
+from the corrupted requirement, so none of them could catch it.
+
+Fixed in `src/trace.ts` by extending step 6, with UT-46 and UT-47 added to the
+contract. UT-47 exists to keep the fix narrow: the marker is stripped only when
+it follows a timestamp, because `00O` alone is indistinguishable from log
+content, and eating content is the worse failure.
+
+The lesson is not about a regex. Synthetic cases inherit the defects of the
+requirement they were written from; only real input is independent of it.
+
 ---
 
 ## T3 — Projection, availability and rendering

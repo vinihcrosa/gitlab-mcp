@@ -319,7 +319,11 @@ Applied by `cleanTrace`, in this order. Changing the order changes the output.
 5. Collapse carriage returns within a line: keep only the text after the last
    `\r`. This is what stops a `docker pull` progress bar from consuming the
    entire tail budget.
-6. Strip a leading ISO-8601 timestamp prefix, when the whole line starts with one.
+6. Strip a leading ISO-8601 timestamp prefix, when the whole line starts with one,
+   together with the stream marker GitLab appends to it — two digits of section
+   depth, `O` or `E` for the stream, and an optional `+` for a continuation
+   (`00O `, `01O `, `00O+`). The marker is stripped only when it follows a
+   timestamp; alone it is indistinguishable from log content.
 7. Drop trailing empty lines. Interior blank lines survive — they are structure.
 
 Steps 3 and 4 run before 5 because a section marker carries its own `\r`, and

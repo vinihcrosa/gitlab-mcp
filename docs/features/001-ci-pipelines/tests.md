@@ -28,6 +28,8 @@ so this contract can be written against literals. Every case below runs offline.
 | UT-06 | `"one\r\ntwo\r\n"` | `["one", "two"]` — CRLF is a line ending, not a rewrite |
 | UT-07 | `"2026-08-12T03:37:08.0175781Z npm error"` | `["npm error"]` — leading ISO-8601 prefix stripped |
 | UT-08 | `"failed at 2026-08-12T03:37:08Z during step"` | unchanged — a timestamp not at line start survives |
+| UT-46 | `"2026-08-10T18:52:31.340190Z 00O <ESC>[31;1mERROR: Job failed<ESC>[0;m"` — a real line from job 15965 | `["ERROR: Job failed"]`; also `00O+` and `01O ` forms |
+| UT-47 | `"00O nao e prefixo aqui"` — marker with no timestamp before it | unchanged — the marker is stripped only when it follows a timestamp |
 | UT-09 | `"a\n\nb"` | `["a", "", "b"]` — interior blank lines are structure |
 | UT-10 | `"a\n\n\n"` | `["a"]` — trailing blank lines dropped |
 | UT-11 | `""` | `[]` |
@@ -112,7 +114,7 @@ reached only from `assertWritable()` at call time, never during registration.
 | 1 ANSI absent | UT-01, UT-02, UT-12 |
 | 2 section markers absent | UT-03, UT-04 |
 | 3 carriage-return line appears once | UT-05, UT-06 |
-| 4 leading timestamp stripped, mid-line kept | UT-07, UT-08 |
+| 4 leading timestamp and stream prefix stripped, mid-line kept | UT-07, UT-08, UT-46, UT-47 |
 | 5 interior blanks kept, trailing dropped | UT-09, UT-10 |
 | 6 under ceiling returns whole | UT-14, UT-18 |
 | 7 over ceiling returns the last N | UT-13, UT-17, UT-21 |
@@ -136,7 +138,7 @@ reached only from `assertWritable()` at call time, never during registration.
 | 25 build and existing suite pass | the existing 15 diff cases, unchanged |
 | 26 read-only still gates exactly three tools | UT-44 — registration side only |
 
-45 cases. **The thinnest row is criterion 15** — one case for a running
+47 cases. **The thinnest row is criterion 15** — one case for a running
 pipeline, which is the state a reviewer hits most often in practice and the one
 with the most shapes (nothing started, some finished, one running, one manual).
 It is the first place to add a case when this feature grows.
