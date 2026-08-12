@@ -65,15 +65,26 @@ MCP stdio não é daemon: você não sobe o servidor, você registra um comando.
 
 ### Claude Code
 
+Instale global e aponte para o arquivo, com caminhos absolutos:
+
 ```bash
+npm i -g @vinihcrosa/gitlab-mcp
+
 claude mcp add gitlab -s user \
   -e GITLAB_URL=https://gitlab.empresa.com \
   -e GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx \
   -e GITLAB_READ_ONLY=true \
-  -- npx -y @vinihcrosa/gitlab-mcp
+  -- "$(which node)" "$(npm root -g)/@vinihcrosa/gitlab-mcp/dist/index.js"
 ```
 
 `-s user` vale em todos os projetos. Use `-s project` só se aceitar que o arquivo `.mcp.json` gerado é commitável — e aí **não** coloque o token nele.
+
+**Por que não `npx` aqui.** Duas armadilhas, as duas silenciosas — o sintoma é sempre `Connection closed`:
+
+1. O bloco `env` **substitui** o ambiente do processo em vez de estender. Sem `PATH`, o `npx` não acha o `node` e morre com `env: node: No such file or directory`. Se insistir no `npx`, passe `-e PATH=/opt/homebrew/bin:/usr/bin:/bin` junto.
+2. O client roda o servidor com `cwd` no diretório do projeto. Se esse projeto for **este repositório**, o `npx` resolve o nome para o pacote local em vez do publicado e falha com `command not found`. Só afeta quem desenvolve o próprio pacote, mas custa meia hora para descobrir.
+
+Caminho absoluto para o `node` e para o `dist/index.js` não depende de `PATH` nem de `cwd`, e ainda corta a resolução do `npx` a cada spawn.
 
 ### Claude Desktop
 
@@ -83,8 +94,8 @@ claude mcp add gitlab -s user \
 {
   "mcpServers": {
     "gitlab": {
-      "command": "npx",
-      "args": ["-y", "@vinihcrosa/gitlab-mcp"],
+      "command": "/opt/homebrew/bin/node",
+      "args": ["/opt/homebrew/lib/node_modules/@vinihcrosa/gitlab-mcp/dist/index.js"],
       "env": {
         "GITLAB_URL": "https://gitlab.empresa.com",
         "GITLAB_TOKEN": "glpat-xxxxxxxxxxxxxxxxxxxx",
@@ -95,7 +106,9 @@ claude mcp add gitlab -s user \
 }
 ```
 
-Rodando a partir do código-fonte, troque `command`/`args` por `"command": "node"` e `"args": ["/caminho/absoluto/para/gitlab-mcp/dist/index.js"]`.
+Descubra os dois caminhos da sua máquina com `which node` e `npm root -g` — variam entre Homebrew, nvm e Linux. As mesmas duas armadilhas da seção do Claude Code valem aqui.
+
+Rodando a partir do código-fonte, aponte `args` para o `dist/index.js` do seu clone.
 
 Para habilitar review inline, troque para `"GITLAB_READ_ONLY": "false"` (e use um token com escopo `api`).
 
