@@ -39,6 +39,7 @@ src/
 test/
   trace.test.ts      # new: unit tests for src/trace.ts
   pipelines.test.ts  # new: unit tests for src/pipelines.ts
+  register.test.ts   # new: the registered tool surface, via a fake server
 ```
 
 | File | Written by | Exists when |
@@ -50,6 +51,7 @@ test/
 | `test/pipelines.test.ts` | T3 | alongside `src/pipelines.ts` |
 | `src/tools/pipelines.ts` | T4 | new module registering three tools |
 | `src/tools/index.ts` | T4 | already exists; one import and one call added |
+| `test/register.test.ts` | T4 | new; exercises `registerAll` against a recorder |
 | `README.md`, `AGENTS.md` | T5 | already exist; scope, tool count and scope table updated |
 
 **Why the split into `src/pipelines.ts` and `src/tools/pipelines.ts`.** The
@@ -200,6 +202,13 @@ export function renderJobLog(job: JobView, traceBody: string): string;
 ```ts
 // src/tools/pipelines.ts
 export function registerPipelines(server: McpServer): void;
+
+/**
+ * Exported so the argument bounds are checkable without a network fixture.
+ * The 1–5000 bound on max_lines is asserted through this, not through zod's
+ * own behaviour.
+ */
+export const jobLogSchema: ZodRawShape;
 
 interface RawPipeline {
   id: number;
