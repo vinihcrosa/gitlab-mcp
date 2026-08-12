@@ -193,7 +193,10 @@ async function request(path: string, opts: RequestOptions, accept: Accept): Prom
   }
 
   if (!res.ok) {
-    const raw = await res.text().catch(() => '');
+    // Teto pequeno e incondicional: a mensagem corta em 500 chars de qualquer
+    // forma, e um 502 de proxy na frente do trace de 100 MB não pode
+    // materializar o corpo inteiro só para virar texto de erro.
+    const raw = await readBoundedText(res, ERROR_BODY_CHARS).catch(() => '');
     throw toGitLabError(res.status, raw, resource);
   }
 
@@ -205,6 +208,52 @@ async function request(path: string, opts: RequestOptions, accept: Accept): Prom
  * armado enquanto o corpo baixa: um trace grande em VPN lenta devolve 200 OK e
  * só então falha aqui.
  */
+/** Teto do corpo de resposta de erro. A mensagem corta em 500 chars mesmo. */
+const ERROR_BODY_CHARS = 4_000;
+
+/**
+ * Lê no máximo `max` caracteres, guardando a cauda, em streaming. Nunca
+ * materializa o corpo inteiro.
+ */
+async function readBoundedText(res: Response, max: number): Promise<string> {
+  const stream = res.body;
+  if (stream === null) return '';
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let acc = '';
+  let dropped = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    acc += decoder.decode(value, { stream: true });
+    if (acc.length > max * 2) {
+      dropped += acc.length - max;
+      acc = keepTail(acc, max);
+    }
+  }
+  acc += decoder.decode();
+  if (acc.length > max) {
+    dropped += acc.length - max;
+    acc = keepTail(acc, max);
+  }
+  boundedDropped.set(res, dropped);
+  return acc;
+}
+
+/**
+ * Cauda de `max` chars sem partir par surrogate. `slice(-max)` podia cair no
+ * meio de um par e deixar meio caractere, que o decoder mostra como \ufffd.
+ */
+function keepTail(s: string, max: number): string {
+  const out = s.slice(-max);
+  const first = out.charCodeAt(0);
+  // 0xDC00-0xDFFF é low surrogate: se é o primeiro char, o par foi partido.
+  return first >= 0xdc00 && first <= 0xdfff ? out.slice(1) : out;
+}
+
+/** Quanto `readBoundedText` descartou, por resposta. */
+const boundedDropped = new WeakMap<Response, number>();
+
 async function readBody(
   res: Response,
   path: string,
@@ -215,31 +264,10 @@ async function readBody(
   try {
     const max = opts.maxTextChars;
     if (max === undefined) return { text: await res.text(), droppedChars: 0 };
-
     // Streaming com cauda rolante: o pico fica em ~2x o teto, não no tamanho
-    // do corpo. `stream: true` no decoder evita partir caractere multibyte na
-    // borda de um chunk.
-    const stream = res.body;
-    if (stream === null) return { text: '', droppedChars: 0 };
-    const reader = stream.getReader();
-    const decoder = new TextDecoder();
-    let acc = '';
-    let dropped = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      acc += decoder.decode(value, { stream: true });
-      if (acc.length > max * 2) {
-        dropped += acc.length - max;
-        acc = acc.slice(-max);
-      }
-    }
-    acc += decoder.decode();
-    if (acc.length > max) {
-      dropped += acc.length - max;
-      acc = acc.slice(-max);
-    }
-    return { text: acc, droppedChars: dropped };
+    // do corpo.
+    const text = await readBoundedText(res, max);
+    return { text, droppedChars: boundedDropped.get(res) ?? 0 };
   } catch (e) {
     const name = e instanceof Error ? e.name : '';
     if (name === 'TimeoutError' || name === 'AbortError') {

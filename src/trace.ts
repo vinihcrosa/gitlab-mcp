@@ -44,12 +44,9 @@ export interface TraceTail {
 }
 
 // CSI: ESC [ ... byte final. Cobre cor, movimento de cursor e \x1b[0K.
-// Exportados porque o cabeçalho montado em volta do trace precisa da mesma
-// higiene que o corpo: sem isto, um nome de job com \x1b[2K\x1b[1G apaga a
-// linha e sobrescreve o prefixo que o servidor escreveu.
-export const ANSI_CSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+const ANSI_CSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 // OSC: ESC ] ... terminado em BEL ou ST. É o que muda título de terminal.
-export const ANSI_OSC = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+const ANSI_OSC = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 // Marcador de seção do GitLab. O nome é sempre identificador, nunca texto livre.
 const SECTION = /section_(?:start|end):\d+:[A-Za-z0-9_.-]+/g;
 // Prefixo de linha do GitLab: timestamp ISO-8601 e, opcionalmente, o marcador
@@ -83,8 +80,12 @@ export function cleanTraceWithCut(raw: string): CleanedTrace {
   //    o corte por linha fica: build quebra no fim.
   let source = raw;
   let charsDropped = 0;
-  if (source.length > MAX_TRACE_CHARS) {
-    charsDropped = source.length - MAX_TRACE_CHARS;
+  // `>=`, não `>`. Em produção o corte acontece no transporte, que devolve uma
+  // string de tamanho EXATAMENTE MAX_TRACE_CHARS começando no meio de uma
+  // linha. Com `>` a comparação era 512000 > 512000 = false, o descarte da
+  // primeira linha era pulado, e o fragmento chegava ao modelo como linha real
+  // — e como a PRIMEIRA que ele lê, quando a cauda tem menos linhas que o teto.
+  if (source.length >= MAX_TRACE_CHARS) {
     source = source.slice(-MAX_TRACE_CHARS);
     const firstBreak = source.indexOf('\n');
     // Só descarta a primeira linha (provavelmente partida) quando existe outra
@@ -167,33 +168,43 @@ export function renderTrace(
   droppedBeforeRead = 0,
 ): TraceRender {
   const cleaned = cleanTraceWithCut(raw);
-  const { lines } = cleaned;
+  const tail = tailLines(cleaned.lines, maxLines);
   const charsDropped = cleaned.charsDropped + droppedBeforeRead;
-  const tail = tailLines(lines, maxLines);
-  let kept = tail.lines;
-  let linesDropped = tail.dropped;
 
-  // Teto do corpo devolvido. Corta pela frente, uma linha por vez, para nunca
-  // partir linha — mesma regra do corte por contagem.
-  let size = kept.reduce((n, l) => n + l.length + 1, 0);
+  // Teto do corpo devolvido. Corta pela frente em limite de linha; o índice é
+  // calculado de uma vez, em vez de um slice por linha descartada.
   let cutForSize = 0;
-  while (kept.length > 1 && size > MAX_BODY_CHARS) {
-    size -= kept[0]!.length + 1;
-    kept = kept.slice(1);
+  let size = tail.lines.reduce((n, l) => n + l.length + 1, 0);
+  while (cutForSize < tail.lines.length - 1 && size > MAX_BODY_CHARS) {
+    size -= tail.lines[cutForSize]!.length + 1;
     cutForSize++;
   }
-  linesDropped += cutForSize;
-
+  const kept = cutForSize === 0 ? tail.lines : tail.lines.slice(cutForSize);
   const body = kept.join('\n');
-  if (linesDropped === 0 && charsDropped === 0) return { body };
 
-  // O aviso conta as DUAS formas de corte. Contar só o corte por linha era
-  // mentira por omissão: quem não vê o erro conclui que ele não está no log.
+  if (tail.dropped === 0 && cutForSize === 0 && charsDropped === 0) return { body };
+
+  // Corte por CONTAGEM e corte por TAMANHO recebem conselhos diferentes.
+  // Somados, uma truncagem por tamanho ganhava o conselho de aumentar
+  // max_lines — que devolve corpo byte-a-byte idêntico, porque as linhas extras
+  // entram e o laço de tamanho as corta de volta. Retry sem progresso.
   const parts: string[] = [];
-  if (linesDropped > 0) parts.push(`${linesDropped} linha(s) anterior(es) omitida(s)`);
-  if (charsDropped > 0) parts.push(`mais ~${Math.round(charsDropped / 1000)} KB cortados do começo por tamanho`);
-  return {
-    body,
-    notice: `[truncado: ${parts.join(', ')} — chame de novo com max_lines maior para ver mais, ou veja o job no browser se o corte por tamanho tirou o que você procura]`,
-  };
+  if (tail.dropped > 0) parts.push(`${tail.dropped} linha(s) anterior(es) omitida(s) pelo limite de linhas`);
+  if (cutForSize > 0) parts.push(`${cutForSize} linha(s) cortada(s) pelo limite de tamanho da resposta`);
+  if (charsDropped > 0) parts.push(`${humanSize(charsDropped)} cortados do começo antes disso`);
+
+  // Só oferece max_lines quando aumentar max_lines muda alguma coisa.
+  const advice =
+    tail.dropped > 0 && cutForSize === 0
+      ? ' — chame de novo com max_lines maior para ver mais'
+      : ' — o limite de tamanho da resposta já foi atingido; aumentar max_lines não muda o corpo. Veja o job no browser se o que você procura ficou acima.';
+
+  return { body, notice: `[truncado: ${parts.join(', ')}${advice}]` };
+}
+
+/** Unidade que não reporta "~0 KB" para 300 chars nem "~99500 KB" para 100 MB. */
+function humanSize(chars: number): string {
+  if (chars < 1000) return `${chars} chars`;
+  if (chars < 1_000_000) return `~${Math.round(chars / 1000)} KB`;
+  return `~${(chars / 1_000_000).toFixed(1)} MB`;
 }

@@ -9,8 +9,8 @@ T3 have no dependencies and can run in parallel; T4 joins them.
 | # | Title | Domain | Complexity | Depends on | Cases |
 |---|---|---|---|---|---|
 | T1 | Transport: text bodies | source | critical | — | — |
-| T2 | Trace cleaning and tail truncation | source | medium | — | UT-01…UT-21, UT-46, UT-47, UT-50…UT-56, UT-69…UT-72 |
-| T3 | Projection, availability and rendering | source | medium | — | UT-22…UT-41, UT-57…UT-68 |
+| T2 | Trace cleaning and tail truncation | source | medium | — | UT-01…UT-21, UT-46, UT-47, UT-50…UT-56, UT-69…UT-72, UT-78…UT-81 |
+| T3 | Projection, availability and rendering | source | medium | — | UT-22…UT-41, UT-57…UT-68, UT-73…UT-77 |
 | T4 | The three tools and their registration | source | medium | T1, T2, T3 | UT-42…UT-45, UT-48, UT-49 |
 | T5 | README and AGENTS.md | docs | low | T4 | — |
 

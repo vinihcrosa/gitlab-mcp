@@ -1,7 +1,11 @@
 // Projeção de campos, truncamento e marcação de conteúdo não confiável.
 // Regra 2 do MVP: nenhuma tool devolve JSON cru do GitLab.
 
-import { ANSI_CSI, ANSI_OSC } from './trace.js';
+// Locais de propósito: `trace.ts` tem as suas. Duas linhas duplicadas custam
+// menos que inverter a camada (higiene de terminal é assunto de formatação) e
+// que compartilhar o `lastIndex` mutável de um regex /g entre módulos.
+const CSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+const OSC = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 
 /** Whitelist explícita. Chaves ausentes no objeto de origem somem da saída. */
 export function pick<K extends string>(src: unknown, keys: readonly K[]): Record<string, unknown> {
@@ -65,15 +69,21 @@ export function untrusted(source: string, content: string): string {
  * linha inteira de servidor. Então mata quebra de linha e o delimitador.
  */
 export function inlineUntrusted(text: string | undefined | null, max = 120): string {
-  const flat = defuseDelimiter(String(text ?? ''))
-    // ANSI primeiro: \x1b[2K\x1b[1G apaga a linha e volta o cursor à coluna 1,
-    // deixando o atacante sobrescrever o prefixo `Job N — ` que o servidor
-    // escreveu. Mesma higiene que cleanTrace aplica ao corpo.
-    .replace(ANSI_CSI, '')
-    .replace(ANSI_OSC, '')
-    // Tudo que qualquer renderizador trata como quebra de linha. \u2028 e
-    // \u2029 quebram linha em vários deles; \v e \f também.
+  // A ORDEM É O CONTROLE. ANSI sai primeiro, delimitador depois.
+  //
+  // Invertido, um ESC plantado dentro do token derrota o regex do delimitador
+  // (`<\x1b[0m/untrusted>` não casa), e o strip de ANSI em seguida FABRICA o
+  // delimitador que a entrada não tinha. Fica pior que não tratar ANSI: em vez
+  // de mover o cursor, o atacante fecha o envelope e escreve como servidor.
+  // `cleanTrace` acerta a ordem no corpo; aqui tem que ser a mesma.
+  const stripped = String(text ?? '')
+    // \x1b[2K\x1b[1G apaga a linha e volta o cursor à coluna 1, deixando
+    // sobrescrever o prefixo `Job N — ` que o servidor escreveu.
+    .replace(CSI, '')
+    .replace(OSC, '')
+    // Tudo que qualquer renderizador trata como quebra de linha.
     .replace(/[\r\n\t\v\f\u2028\u2029]+/g, ' ');
+  const flat = defuseDelimiter(stripped);
   return flat.length <= max ? flat : `${flat.slice(0, max)}…`;
 }
 

@@ -208,8 +208,38 @@ describe('9b. o teto de caractere não pode engolir o trace inteiro', () => {
     const raw = Array.from({ length: 400 }, (_, i) => `${i} ${'x'.repeat(3000)}`).join('\n');
     const { body, notice } = renderTrace(raw, 400);
     expect(body.length).toBeLessThanOrEqual(MAX_BODY_CHARS);
-    expect(notice).toBeDefined();
-    expect(notice).toContain('linha(s) anterior(es) omitida(s)');
+    expect(notice).toContain('limite de tamanho da resposta');
+  });
+
+  it('UT-78 corte por tamanho NÃO manda aumentar max_lines — o retry não mudaria nada', () => {
+    const raw = Array.from({ length: 400 }, (_, i) => `${i} ${'y'.repeat(1900)}`).join('\n');
+    const small = renderTrace(raw, 400);
+    const big = renderTrace(raw, 5000);
+    // Aumentar max_lines só alimenta o laço de tamanho, que corta de volta.
+    expect(big.body).toBe(small.body);
+    expect(small.notice).not.toContain('max_lines maior');
+    expect(small.notice).toContain('aumentar max_lines não muda o corpo');
+  });
+
+  it('UT-79 corte só por contagem continua oferecendo max_lines', () => {
+    const { notice } = renderTrace(numbered(1000).join('\n'), 400);
+    expect(notice).toContain('max_lines maior');
+  });
+
+  it('UT-80 origem de tamanho exatamente igual ao teto ainda descarta a linha partida', () => {
+    // Em produção o corte é no transporte, que devolve EXATAMENTE
+    // MAX_TRACE_CHARS começando no meio de uma linha. Com `>` no lugar de `>=`
+    // o descarte era pulado e o fragmento virava a primeira linha lida.
+    const head = 'FRAGMENTO-PARTIDO';
+    const tail = '\nreal';
+    const raw = head + 'z'.repeat(MAX_TRACE_CHARS - head.length - tail.length) + tail;
+    expect(raw.length).toBe(MAX_TRACE_CHARS);
+    expect(cleanTrace(raw)).toEqual(['real']);
+  });
+
+  it('UT-81 unidade do corte: chars abaixo de 1 KB, MB acima de 1000 KB', () => {
+    expect(renderTrace('a\nb\nc', 400, 300).notice).toContain('300 chars');
+    expect(renderTrace('a\nb\nc', 400, 5_000_000).notice).toContain('MB');
   });
 
   it('UT-72 maxLines NaN cai no default em vez de imprimir NaN', () => {

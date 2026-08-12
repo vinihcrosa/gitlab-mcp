@@ -16,6 +16,8 @@ import {
   renderPipelineList,
   toJobView,
   toPipelineView,
+  val,
+  withInlineNote,
 } from '../pipelines.js';
 import { DEFAULT_TRACE_LINES, MAX_TRACE_CHARS, MAX_TRACE_LINES, renderTrace } from '../trace.js';
 import { tool } from './register.js';
@@ -38,8 +40,15 @@ const MAX_PIPELINE_PAGES = 5;
  *
  * Então varre as páginas e tira o máximo global, em vez de confiar na primeira.
  */
-export async function latestMrPipeline(projectId: number, iid: number, label: string): Promise<RawPipeline | undefined> {
+export interface LatestPipeline {
+  pipeline: RawPipeline | undefined;
+  /** true quando a varredura parou no teto de páginas — visível na resposta. */
+  truncated: boolean;
+}
+
+export async function latestMrPipeline(projectId: number, iid: number, label: string): Promise<LatestPipeline> {
   const all: RawPipeline[] = [];
+  let truncated = false;
   for (let page = 1; page <= MAX_PIPELINE_PAGES; page++) {
     const res = await gl<RawPipeline[]>(`/projects/${projectId}/merge_requests/${iid}/pipelines`, {
       query: { per_page: 100, page },
@@ -50,16 +59,33 @@ export async function latestMrPipeline(projectId: number, iid: number, label: st
     const next = res.page.nextPage;
     if (batch.length === 0 || !next || next <= 0) break;
     if (page === MAX_PIPELINE_PAGES) {
+      truncated = true;
       log(`MR !${iid} de ${label} tem mais de ${MAX_PIPELINE_PAGES * 100} pipelines; a varredura parou aí.`);
     }
   }
-  return newest(all);
+  return { pipeline: newest(all), truncated };
 }
 
 export interface JobsPage {
   jobs: RawJob[];
   /** true só quando o GitLab diz que existe página seguinte. */
   hasMore: boolean;
+}
+
+/**
+ * Só os jobs que falharam, pedidos ao GitLab com `scope[]=failed`.
+ *
+ * Existe porque `pipelineJobs` lê uma página: numa pipeline de 250 jobs cujo
+ * único job falho é o #150, filtrar a primeira página devolvia uma pipeline
+ * `failed` sem nenhuma falha listada — e a tool promete justamente a chamada
+ * pronta de get_job_log para cada job que falhou.
+ */
+export async function failedPipelineJobs(projectId: number, pipelineId: number, label: string): Promise<RawJob[]> {
+  const { data } = await gl<RawJob[]>(`/projects/${projectId}/pipelines/${pipelineId}/jobs`, {
+    query: { per_page: JOBS_PER_PAGE, include_retried: false, 'scope[]': 'failed' },
+    resource: `os jobs que falharam na pipeline #${pipelineId} de ${label}`,
+  });
+  return data ?? [];
 }
 
 export async function pipelineJobs(projectId: number, pipelineId: number, label: string): Promise<JobsPage> {
@@ -143,16 +169,25 @@ export function registerPipelines(server: McpServer): void {
       const iid = args.iid as number;
       const label = project.path_with_namespace;
 
-      const raw = await latestMrPipeline(project.id, iid, label);
+      const { pipeline: raw, truncated } = await latestMrPipeline(project.id, iid, label);
       if (raw === undefined) {
         return `MR !${iid} de ${label} não tem pipeline. Isso é estado válido: o projeto pode não ter CI, ou a branch não disparou nada.`;
       }
 
       const { jobs, hasMore } = await pipelineJobs(project.id, raw.id, label);
-      const body = renderPipeline(toPipelineView(raw), jobs.map(toJobView), label, iid);
 
-      if (!hasMore) return body;
-      return `${body}\n\n[esta pipeline tem mais de ${JOBS_PER_PAGE} jobs; só a primeira página aparece acima — veja ${raw.web_url}]`;
+      // Passando de uma página, a lista de falhas vem de uma chamada própria
+      // com scope=failed. Sem isso, o job que quebrou podia estar na página 2 e
+      // a resposta sairia com "failed" e nenhuma falha nomeada.
+      const failed = hasMore ? (await failedPipelineJobs(project.id, raw.id, label)).map(toJobView) : undefined;
+      const body = renderPipeline(toPipelineView(raw), jobs.map(toJobView), label, iid, failed);
+
+      const scanNote = truncated
+        ? `\n\n[o MR tem mais de ${MAX_PIPELINE_PAGES * 100} pipelines; a varredura parou aí, então a "mais recente" acima pode não ser a última de todas]`
+        : '';
+
+      if (!hasMore) return `${body}${scanNote}`;
+      return `${body}${scanNote}\n\n[esta pipeline tem mais de ${JOBS_PER_PAGE} jobs; a listagem acima é só a primeira página, mas a lista de jobs que falharam foi buscada à parte e está completa — veja ${val(raw.web_url)}]`;
     },
   );
 
@@ -177,10 +212,14 @@ export function registerPipelines(server: McpServer): void {
       const availability = logAvailability(job);
 
       if (availability.kind === 'never-started') {
-        return `Job ${jobId} (${inlineUntrusted(job.name, 80)}) não produziu log: status ${availability.status}, nunca começou a executar.`;
+        return withInlineNote(
+          `Job ${jobId} (${inlineUntrusted(job.name, 80)}) não produziu log: status ${availability.status}, nunca começou a executar.`,
+        );
       }
       if (availability.kind === 'erased') {
-        return `Job ${jobId} (${inlineUntrusted(job.name, 80)}) teve o log apagado em ${availability.erasedAt}. Veja ${availability.webUrl} se ainda houver algo lá.`;
+        return withInlineNote(
+          `Job ${jobId} (${inlineUntrusted(job.name, 80)}) teve o log apagado em ${availability.erasedAt}. Veja ${val(availability.webUrl)} se ainda houver algo lá.`,
+        );
       }
 
       let trace: string;
@@ -197,7 +236,7 @@ export function registerPipelines(server: McpServer): void {
       } catch (e) {
         if (e instanceof GitLabError && e.status === 404) {
           throw new GitLabError(
-            `${e.message} O log pode ter sido arquivado; veja ${job.web_url}.`,
+            `${e.message} O log pode ter sido arquivado; veja ${val(job.web_url)}.`,
             e.status,
             e.body,
           );

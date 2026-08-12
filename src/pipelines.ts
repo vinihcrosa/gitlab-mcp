@@ -80,8 +80,14 @@ export function toJobView(raw: unknown): JobView {
  * o estado atual da branch.
  */
 export function newest(pipelines: RawPipeline[]): RawPipeline | undefined {
+  // Elemento sem `id` não pode ganhar: `undefined > n` e `n > undefined` são
+  // ambos false, então o primeiro da lista nunca era deslocado e voltava — o
+  // resultado dependia da ordem, e get_mr_pipeline ia pedir
+  // /pipelines/undefined/jobs. `RawPipeline` declara id obrigatório, então o
+  // tipo não pega; o resto deste arquivo já foi feito total sobre ausência.
   let best: RawPipeline | undefined;
   for (const p of pipelines) {
+    if (typeof p?.id !== 'number') continue;
     if (best === undefined || p.id > best.id) best = p;
   }
   return best;
@@ -89,6 +95,22 @@ export function newest(pipelines: RawPipeline[]): RawPipeline | undefined {
 
 /** Estados finais de um job. Fora daqui, ele ainda pode produzir saída. */
 const TERMINAL_STATUSES = new Set(['success', 'failed', 'canceled', 'skipped']);
+
+/**
+ * Estados em que o job comprovadamente ainda não rodou. `canceled` entra porque
+ * o teste combina com `started_at` ausente: cancelado DEPOIS de começar tem
+ * started_at, então só o cancelado antes de começar cai aqui — que senão ia
+ * para `ready` e recebia a mensagem de "log pode ter sido arquivado".
+ */
+const NEVER_RAN_STATUSES = new Set([
+  'created',
+  'pending',
+  'manual',
+  'skipped',
+  'waiting_for_resource',
+  'scheduled',
+  'canceled',
+]);
 
 export type LogAvailability =
   | { kind: 'ready' }
@@ -102,16 +124,6 @@ export type LogAvailability =
  * Precedência fixa: nunca-começou vence log-apagado. Um job que não começou não
  * tinha log para apagar, então essa é a explicação verdadeira.
  */
-/** Estados em que o job comprovadamente ainda não rodou. */
-const NEVER_RAN_STATUSES = new Set([
-  'created',
-  'pending',
-  'manual',
-  'skipped',
-  'waiting_for_resource',
-  'scheduled',
-]);
-
 export function logAvailability(job: RawJob): LogAvailability {
   // `started_at` ausente só significa "nunca começou" quando o status também
   // diz isso. Colapsar ausência em null fazia um job `success` sem o campo
@@ -136,10 +148,21 @@ const dur = (d: number | null | undefined): string => (typeof d === 'number' ? `
  * UT-24 depende disso para `duration: null` — então qualquer campo que a API
  * mande como null chega aqui e viraria a string "null" na saída.
  */
-const val = (v: string | number | null | undefined): string =>
+export const val = (v: string | number | null | undefined): string =>
   v === undefined || v === null ? '—' : String(v);
 
-export function renderPipeline(p: PipelineView, jobs: JobView[], label: string, iid: number): string {
+export function renderPipeline(
+  p: PipelineView,
+  jobs: JobView[],
+  label: string,
+  iid: number,
+  /**
+   * Lista autoritativa de jobs que falharam. Passada quando a pipeline tem mais
+   * jobs que uma página: filtrar `jobs` daria a lista só da primeira página, e
+   * uma pipeline `failed` sairia sem nenhum job falho listado.
+   */
+  failedOverride?: JobView[],
+): string {
   const out: string[] = [
     `MR ${label}!${iid} — pipeline #${val(p.id)}: ${val(p.status)}`,
     `  sha        = ${shortSha(p.sha)}`,
@@ -153,7 +176,10 @@ export function renderPipeline(p: PipelineView, jobs: JobView[], label: string, 
   ];
 
   if (jobs.length === 0) {
-    out.push('Nenhum job nesta pipeline ainda.');
+    // `ref` já foi renderizado acima, então esta saída também carrega texto
+    // livre — e pipeline sem job ainda é o caso comum de MR recém-pushado,
+    // exatamente quando get_mr_pipeline é mais chamada.
+    out.push('Nenhum job nesta pipeline ainda.', '', INLINE_UNTRUSTED_NOTE);
     return out.join('\n');
   }
 
@@ -165,7 +191,7 @@ export function renderPipeline(p: PipelineView, jobs: JobView[], label: string, 
     out.push(`  ${val(j.status).padEnd(9)} ${who}  id=${val(j.id)}  duração=${dur(j.duration)}${reason}`);
   }
 
-  const failed = jobs.filter((j) => j.status === 'failed');
+  const failed = failedOverride ?? jobs.filter((j) => j.status === 'failed');
   if (failed.length > 0) {
     out.push('', `Jobs que falharam (${failed.length}):`);
     for (const j of failed) {
@@ -210,6 +236,15 @@ export function renderPipelineList(items: PipelineView[], page: Record<string, u
  * inlineUntrusted. O aviso de corte também fica fora: é texto do servidor e diz
  * o que fazer em seguida, não pode chegar como dado que a nota manda ignorar.
  */
+/**
+ * A nota inline vale para toda resposta que carrega nome/stage/branch fora de
+ * envelope — inclusive as saídas curtas de "nunca começou" e "log apagado",
+ * que também imprimem o nome do job.
+ */
+export function withInlineNote(text: string): string {
+  return `${text}\n\n${INLINE_UNTRUSTED_NOTE}`;
+}
+
 export function renderJobLog(job: JobView, trace: TraceRender): string {
   const reason = job.failure_reason ? ` — failure_reason: ${inlineUntrusted(job.failure_reason, 60)}` : '';
   const header =
@@ -217,6 +252,9 @@ export function renderJobLog(job: JobView, trace: TraceRender): string {
     `(stage ${inlineUntrusted(job.stage, 40)}) — status ${val(job.status)}${reason}`;
   const notice = trace.notice ? `\n${trace.notice}` : '';
 
+  // A nota do envelope diz, com as próprias palavras, "o conteúdo em
+  // <untrusted>" — não cobre o cabeçalho acima dela, que carrega name, stage e
+  // failure_reason escritos por quem abriu o MR. Precisa das duas.
   if (trace.body === '') {
     // "terminou" só quando terminou. Pedir o log de um job que acabou de subir
     // é o primeiro movimento natural, e dizer que acabou é o oposto do que a
@@ -225,8 +263,8 @@ export function renderJobLog(job: JobView, trace: TraceRender): string {
     const verb = done
       ? `terminou com status ${val(job.status)} mas o trace veio vazio`
       : `está com status ${val(job.status)} e ainda não emitiu saída — chame de novo em instantes`;
-    return `${header}${notice}\n\nJob ${val(job.id)} ${verb}.`;
+    return withInlineNote(`${header}${notice}\n\nJob ${val(job.id)} ${verb}.`);
   }
 
-  return withUntrustedNote(`${header}${notice}\n\n${untrusted('job_trace', trace.body)}`);
+  return withInlineNote(withUntrustedNote(`${header}${notice}\n\n${untrusted('job_trace', trace.body)}`));
 }
