@@ -5,6 +5,7 @@ import { registerMrs } from './mrs.js';
 import { registerDiff } from './diff.js';
 import { registerDiscussions } from './discussions.js';
 import { registerWrite } from './write.js';
+import { registerPipelines } from './pipelines.js';
 
 export function registerAll(server: McpServer): void {
   registerWhoami(server); // 1
@@ -13,4 +14,5 @@ export function registerAll(server: McpServer): void {
   registerDiff(server); // 6
   registerDiscussions(server); // 7
   registerWrite(server); // 8, 9, 10
+  registerPipelines(server); // 11, 12, 13
 }
