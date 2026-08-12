@@ -1,15 +1,16 @@
-# Publica no npm via trusted publishing (OIDC). Sem NPM_TOKEN, sem OTP.
+# Publishes to npm via trusted publishing (OIDC). No NPM_TOKEN, no OTP.
 #
-# Pre-requisito, feito uma vez em npmjs.com:
+# One-time prerequisite on npmjs.com (already done):
 #   @vinihcrosa/gitlab-mcp -> Settings -> Trusted publishing -> GitHub Actions
 #     Organization or user: vinihcrosa
 #     Repository:           gitlab-mcp
 #     Workflow filename:    publish.yml
 #
-# O npm so deixa configurar isso depois que o pacote existe no registry, entao
-# o primeiro publish tem que sair por outro caminho (token com Bypass 2FA ou OTP).
+# npm only allows configuring this after the package exists in the registry, so
+# the first publish (0.1.0) had to go out another way (token with Bypass 2FA or
+# OTP). Everything from 0.1.1 on ships through this workflow.
 #
-# Disparo: criar uma release/tag no GitHub, ou rodar na mao pela aba Actions.
+# Triggers: publishing a GitHub release, or a manual run from the Actions tab.
 
 name: publish
 
@@ -23,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      id-token: write # exigido pelo OIDC do trusted publishing
+      id-token: write # required by trusted publishing's OIDC exchange
       contents: read
 
     steps:
@@ -31,20 +32,21 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # trusted publishing exige npm >= 11.5.1. O Node 24 ja traz npm 11.x
-          # embutido, entao nao precisa instalar npm global.
-          # Nao pinar `npm install -g npm@latest`: o npm 12 exige Node
-          # ^22.22.2 || ^24.15.0 || >=26, e quebra em Node pinado mais velho.
+          # Trusted publishing requires npm >= 11.5.1. Node 24 already bundles
+          # npm 11.x, so there is no need to install npm globally.
+          # Do not add `npm install -g npm@latest`: npm 12 requires Node
+          # ^22.22.2 || ^24.15.0 || >=26 and breaks on an older pinned Node.
           node-version: '24'
-          # NAO usar `registry-url` aqui. Ele escreve um .npmrc com
-          # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` e, sem
-          # NPM_TOKEN, o setup-node preenche NODE_AUTH_TOKEN com o placeholder
-          # literal `XXXXX-XXXXX-XXXXX-XXXXX`. O npm entao acha que ja tem
-          # credencial, nunca tenta o OIDC, e o registry responde 404.
-          # registry.npmjs.org ja e o default; `publishConfig.access: public`
-          # no package.json cobre o resto.
+          # Do NOT set `registry-url` here. It makes setup-node write an .npmrc
+          # containing `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`,
+          # and with no NPM_TOKEN secret that variable holds setup-node's
+          # literal placeholder `XXXXX-XXXXX-XXXXX-XXXXX`. npm then believes it
+          # already has a credential, never attempts the OIDC exchange, and the
+          # registry rejects the garbage token as a 404.
+          # registry.npmjs.org is the default anyway, and
+          # `publishConfig.access: public` in package.json covers the rest.
 
-      - name: Versoes (trusted publishing exige npm >= 11.5.1)
+      - name: Versions (trusted publishing requires npm >= 11.5.1)
         run: node --version && npm --version
 
       - run: npm ci
@@ -53,6 +55,8 @@ jobs:
 
       - run: npm test
 
-      # Sem NPM_TOKEN: o npm detecta o ambiente OIDC e se autentica sozinho.
+      # With no NPM_TOKEN present, npm detects the OIDC environment and
+      # authenticates on its own. A signed provenance statement in the log is
+      # the proof that this path was taken.
       - name: Publish
         run: npm publish
