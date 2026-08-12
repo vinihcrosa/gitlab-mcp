@@ -31,12 +31,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # trusted publishing exige Node >= 22.14 e npm >= 11.5.1
-          node-version: '22.14'
+          # trusted publishing exige npm >= 11.5.1. O Node 24 ja traz npm 11.x
+          # embutido, entao nao precisa instalar npm global.
+          # Nao pinar `npm install -g npm@latest`: o npm 12 exige Node
+          # ^22.22.2 || ^24.15.0 || >=26, e quebra em Node pinado mais velho.
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-
-      - name: Garante npm >= 11.5.1
-        run: npm install -g npm@latest
 
       - run: npm ci
 

@@ -15,8 +15,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # package.json engines: node >= 20
-        node-version: ['20', '22']
+        # package.json engines: node >= 20. 24 is what publish.yml runs on.
+        node-version: ['20', '22', '24']
 
     steps:
       - uses: actions/checkout@v4
