@@ -108,7 +108,7 @@ unnecessary.
 
 ## T2 — Trace cleaning and tail truncation
 
-- [ ] T2 — Trace cleaning and tail truncation
+- [x] T2 — Trace cleaning and tail truncation
 
 ### Overview
 
@@ -132,15 +132,15 @@ collapsed the progress bars. Independent of everything else in the feature.
 
 ### Subtasks
 
-- [ ] Line-ending normalisation and splitting
-- [ ] Section-marker removal
-- [ ] ANSI stripping, CSI and OSC
-- [ ] Carriage-return collapsing
-- [ ] Leading-timestamp stripping
-- [ ] Trailing-blank trimming
-- [ ] `tailLines` with its dropped count
-- [ ] `renderTrace` composing the two, with the notice placement
-- [ ] The 21 cases
+- [x] Line-ending normalisation and splitting
+- [x] Section-marker removal
+- [x] ANSI stripping, CSI and OSC
+- [x] Carriage-return collapsing
+- [x] Leading-timestamp stripping
+- [x] Trailing-blank trimming
+- [x] `tailLines` with its dropped count
+- [x] `renderTrace` composing the two, with the notice placement
+- [x] The 21 cases
 
 ### Files
 
@@ -162,6 +162,42 @@ it exists for.
 
 All 21 cases pass. `npx tsc --noEmit` clean. `src/trace.ts` has no import from
 `gitlab.ts`, `format.ts` or the SDK, checkable by reading its import block.
+
+### Completion notes
+
+**Evidence.**
+
+```
+$ npm test
+ ✓ test/diff.test.ts (15 tests) 4ms
+ ✓ test/trace.test.ts (21 tests) 18ms
+ Test Files  2 passed (2)
+      Tests  36 passed (36)
+$ npx tsc --noEmit
+exit 0
+```
+
+Invariant 3 holds by inspection: `src/trace.ts` has no import statement at all.
+
+**Ordering confirmed by the cases, not by argument.** UT-03 and UT-04 are what
+prove steps 3 and 4 must precede step 5. A GitLab section marker is
+`section_start:<ts>:<name>\r\x1b[0K<content>` — collapsing carriage returns first
+would keep everything after that `\r`, leaving `\x1b[0K<content>` and then, after
+ANSI stripping, the right answer by accident. UT-04 is where the accident stops
+working: a line holding only a marker collapses to the escape sequence rather
+than to nothing.
+
+**Conflict resolved.** None. `tests.md` and `tdd.md` agreed on every case.
+
+**Outside the declared files.** Nothing.
+
+**Defects caught.** None during implementation. UT-19 was written as a
+set-membership assertion over the cleaned source rather than an index comparison,
+so it fails on a mid-line cut regardless of where the cut lands — an index
+comparison would have passed on an off-by-one that still split a line.
+
+**Follow-ups.** `MAX_TRACE_LINES` is exported and unused until T4 wires it into
+the argument schema. That is the intended sequence, not a loose end.
 
 ---
 
