@@ -90,6 +90,21 @@ so this contract can be written against literals. Every case below runs offline.
 | UT-40 | `renderJobLog` for a job with `failure_reason: "job_execution_timeout"` | header carries name, stage, status and that failure reason |
 | UT-41 | `renderJobLog(job, "")` for a job that ran and finished | states that the trace came back empty, rather than emitting an empty untrusted block |
 
+## F. Registration — the tool surface
+
+`test/register.test.ts`
+
+A fake server object recording `registerTool` calls. No network, no config: every
+call site funnels through `src/tools/register.ts:25`, and `isReadOnly()` is
+reached only from `assertWritable()` at call time, never during registration.
+
+| ID | Input / condition | Expected |
+|---|---|---|
+| UT-42 | `registerAll` against a recorder | exactly 13 names recorded, no duplicates |
+| UT-43 | the recorded names | contain the ten pre-existing names and the three new ones — `get_mr_pipeline`, `get_job_log`, `list_pipelines` |
+| UT-44 | `registerAll` while read-only mode is active | still 13 — read-only gates at call time through `assertWritable`, never at registration |
+| UT-45 | the exported `get_job_log` argument schema parsing `{project:"g/p", job_id:1, max_lines:6000}` | rejected; `max_lines: 400` accepted; `max_lines` omitted accepted |
+
 ## Coverage matrix
 
 | Criterion | Cases |
@@ -103,7 +118,7 @@ so this contract can be written against literals. Every case below runs offline.
 | 7 over ceiling returns the last N | UT-13, UT-17, UT-21 |
 | 8 notice states the count and precedes content | UT-17 |
 | 9 no fragment lines | UT-19 |
-| 10 `max_lines` out of range rejected | none — see exclusions |
+| 10 `max_lines` out of range rejected | UT-45 |
 | 11 pipeline fields projected | UT-22, UT-23 |
 | 12 job fields projected | UT-24, UT-25 |
 | 13 failed job named with its log call | UT-32, UT-35 |
@@ -117,14 +132,19 @@ so this contract can be written against literals. Every case below runs offline.
 | 21 listing fields projected | UT-37 |
 | 22 `ref` and `status` reach the API | none — see exclusions |
 | 23 pagination block present | UT-37 |
-| 24 existing tools unchanged | none — see exclusions |
+| 24 existing tools unchanged | UT-42, UT-43 — a dropped registration is caught |
 | 25 build and existing suite pass | the existing 15 diff cases, unchanged |
-| 26 read-only still gates exactly three tools | none — see exclusions |
+| 26 read-only still gates exactly three tools | UT-44 — registration side only |
 
-41 cases. **The thinnest row is criterion 15** — one case for a running
+45 cases. **The thinnest row is criterion 15** — one case for a running
 pipeline, which is the state a reviewer hits most often in practice and the one
 with the most shapes (nothing started, some finished, one running, one manual).
 It is the first place to add a case when this feature grows.
+
+Criterion 26 is the second thinnest and the more honest worry: UT-44 proves
+read-only does not change *registration*, which is not the same as proving it
+still gates the three write tools at call time. That half remains uncovered, for
+the reason in the exclusions below.
 
 ## What is deliberately not covered
 
@@ -133,10 +153,10 @@ is worth more than a case that asserts nothing.
 
 | Not covered | Why | What stands in its place |
 |---|---|---|
-| Criterion 10, `max_lines` bounds | The bound is a zod `.min(1).max(5000)` on the argument schema. A test for it tests zod, not this feature. | The schema is declared once, and review checks it against the design's argument table. |
 | Criterion 20, the 403 scope message | It is `gl()`'s existing translation, unchanged by this feature. Asserting it here would lock behaviour this feature does not own. | Non-regression: `gl()`'s error path is untouched by construction. |
 | Criterion 22, filters reaching the API | Asserting a query string requires intercepting the request, which needs the fixture server this project does not have. | The tool passes the arguments through to `gl()`'s `query` with no local filtering; review checks the call site. |
-| Criteria 24 and 26, existing behaviour | There are no tests over the ten existing tools today; adding a harness for them is a separate slice, not a rider on this one. | `gl()`'s signature and JSON behaviour are unchanged by construction, and the build fails on a type break. |
+| Criterion 26, read-only gating at call time | Proving `assertWritable` still throws for the three write tools means invoking their handlers, which reach the network on the line after the guard. That needs the fixture server this project does not have. | UT-44 covers the registration half. The guard itself is untouched by this feature. |
+| The ten existing tools' behaviour | There are no tests over them today; building that harness is a separate slice, not a rider on this one. | UT-42 and UT-43 catch a *dropped* tool. `gl()`'s signature and JSON behaviour are unchanged by construction, and the build fails on a type break. |
 | That `logAvailability` non-`ready` actually skips the network call | The decision is unit-tested; the *skipping* is control flow in the tool layer. | Invariant 12, checked in review. |
 | Any assertion over tool description text | Grepping a description for a phrase locks the wording without checking behaviour. | Whether the descriptions work is answered by use. |
 
