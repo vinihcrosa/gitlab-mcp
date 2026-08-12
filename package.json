@@ -1,6 +1,6 @@
 {
   "name": "@vinihcrosa/gitlab-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server (stdio) — proxy fino sobre a REST API v4 de um GitLab CE self-hosted, focado em navegar MRs e deixar review inline.",
   "type": "module",
   "bin": {
