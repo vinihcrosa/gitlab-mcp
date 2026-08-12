@@ -110,11 +110,14 @@ function toGitLabError(status: number, raw: string, resource: string): GitLabErr
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-async function once(url: string, opts: RequestOptions): Promise<Response> {
+/** O que a chamada aceita de volta. Só isso difere entre gl() e glText(). */
+type Accept = 'application/json' | 'text/plain';
+
+async function once(url: string, opts: RequestOptions, accept: Accept): Promise<Response> {
   const cfg = getConfig();
   const headers: Record<string, string> = {
     'PRIVATE-TOKEN': cfg.token,
-    Accept: 'application/json',
+    Accept: accept,
   };
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
 
@@ -126,15 +129,19 @@ async function once(url: string, opts: RequestOptions): Promise<Response> {
   });
 }
 
-/** Uma chamada à API v4. Lança GitLabError já traduzido. */
-export async function gl<T>(path: string, opts: RequestOptions = {}): Promise<GitLabResponse<T>> {
+/**
+ * Núcleo compartilhado: url, header, timeout, retry único de 429 e tradução de
+ * erro. Devolve a Response já garantidamente ok — quem chama só decide como ler
+ * o corpo. Existir uma vez só é o que impede gl() e glText() de divergirem.
+ */
+async function request(path: string, opts: RequestOptions, accept: Accept): Promise<Response> {
   const cfg = getConfig();
   const resource = opts.resource ?? path;
   const url = buildUrl(path, opts.query);
 
   let res: Response;
   try {
-    res = await once(url, opts);
+    res = await once(url, opts, accept);
   } catch (e) {
     const name = e instanceof Error ? e.name : '';
     if (name === 'TimeoutError' || name === 'AbortError') {
@@ -156,7 +163,7 @@ export async function gl<T>(path: string, opts: RequestOptions = {}): Promise<Gi
     const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 60) * 1000 : 5000;
     log(`429 em ${resource}; aguardando ${waitMs}ms e tentando uma vez.`);
     await sleep(waitMs);
-    res = await once(url, opts);
+    res = await once(url, opts, accept);
   }
 
   if (!res.ok) {
@@ -164,7 +171,22 @@ export async function gl<T>(path: string, opts: RequestOptions = {}): Promise<Gi
     throw toGitLabError(res.status, raw, resource);
   }
 
+  return res;
+}
+
+/** Uma chamada à API v4. Lança GitLabError já traduzido. */
+export async function gl<T>(path: string, opts: RequestOptions = {}): Promise<GitLabResponse<T>> {
+  const res = await request(path, opts, 'application/json');
   const text = await res.text();
   const data = (text ? JSON.parse(text) : null) as T;
   return { data, page: readPage(res.headers) };
+}
+
+/**
+ * Mesma requisição, mesmo tratamento de erro, mesmo retry — corpo devolvido
+ * cru, sem parse. Para endpoint que não responde JSON: hoje, trace de job.
+ */
+export async function glText(path: string, opts: RequestOptions = {}): Promise<GitLabResponse<string>> {
+  const res = await request(path, opts, 'text/plain');
+  return { data: await res.text(), page: readPage(res.headers) };
 }

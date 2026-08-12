@@ -18,7 +18,7 @@ T3 have no dependencies and can run in parallel; T4 joins them.
 
 ## T1 — Transport: text bodies
 
-- [ ] T1 — Transport: text bodies
+- [x] T1 — Transport: text bodies
 
 ### Overview
 
@@ -40,10 +40,10 @@ can break behaviour that shipped.
 
 ### Subtasks
 
-- [ ] Extract URL building, headers, timeout and the 429 retry into the shared core
-- [ ] Re-express `gl<T>()` over the core, unchanged in behaviour
-- [ ] Add `glText()` over the same core with the text `Accept` header
-- [ ] Confirm error translation still runs before either entry point returns
+- [x] Extract URL building, headers, timeout and the 429 retry into the shared core
+- [x] Re-express `gl<T>()` over the core, unchanged in behaviour
+- [x] Add `glText()` over the same core with the text `Accept` header
+- [x] Confirm error translation still runs before either entry point returns
 
 ### Files
 
@@ -65,6 +65,44 @@ sites, and the existing suite still runs.
 `npm run build` and `npx tsc --noEmit` clean. `npm test` still reports 15 passing
 diff cases. A reading of the diff confirms `gl()`'s body is the same logic, moved
 — not rewritten.
+
+### Completion notes
+
+**Evidence.**
+
+```
+$ npx tsc --noEmit
+exit 0
+$ npm run build
+> tsc && chmod +x dist/index.js
+$ npm test
+ ✓ test/diff.test.ts (15 tests) 4ms
+ Test Files  1 passed (1)
+      Tests  15 passed (15)
+```
+
+**Shape delivered.** `request(path, opts, accept)` holds url building, headers,
+timeout, the 429 retry and error translation, and returns a `Response` already
+known to be ok. `gl<T>()` reads it as JSON, `glText()` reads it as text. The only
+difference between the two paths is the `Accept` header, expressed as a two-value
+`Accept` type rather than a boolean, so neither entry point can be called with a
+meaningless combination.
+
+**Conflict resolved.** The author's stated preference is English for repository
+artifacts, but `src/gitlab.ts` is entirely Portuguese and `AGENTS.md` §6 requires
+error messages in Portuguese — which this file is mostly made of. Mixing
+languages inside one module is worse than either choice, so the new comments
+follow the file. The preference stands for artifacts written from scratch; it
+does not justify a half-translated module.
+
+**Outside the declared files.** Nothing.
+
+**Defects caught.** None. `tsc --noEmit` was the intended guard for the ten
+existing call sites and it passed on the first run, which is the expected outcome
+for a mechanical extraction — it confirms the guard ran, not that it was
+unnecessary.
+
+**Follow-ups.** None.
 
 ---
 
