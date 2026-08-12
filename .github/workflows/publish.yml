@@ -36,7 +36,16 @@ jobs:
           # Nao pinar `npm install -g npm@latest`: o npm 12 exige Node
           # ^22.22.2 || ^24.15.0 || >=26, e quebra em Node pinado mais velho.
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
+          # NAO usar `registry-url` aqui. Ele escreve um .npmrc com
+          # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` e, sem
+          # NPM_TOKEN, o setup-node preenche NODE_AUTH_TOKEN com o placeholder
+          # literal `XXXXX-XXXXX-XXXXX-XXXXX`. O npm entao acha que ja tem
+          # credencial, nunca tenta o OIDC, e o registry responde 404.
+          # registry.npmjs.org ja e o default; `publishConfig.access: public`
+          # no package.json cobre o resto.
+
+      - name: Versoes (trusted publishing exige npm >= 11.5.1)
+        run: node --version && npm --version
 
       - run: npm ci
 
