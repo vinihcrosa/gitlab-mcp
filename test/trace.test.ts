@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_TRACE_LINES,
+  MAX_BODY_CHARS,
   MAX_LINE_CHARS,
   MAX_TRACE_CHARS,
   cleanTrace,
@@ -181,6 +182,39 @@ describe('9. tetos de caractere — o que teto de linha não segura', () => {
   it('UT-53 a primeira linha do recorte, provavelmente partida ao meio, é descartada', () => {
     const raw = `${'z'.repeat(MAX_TRACE_CHARS + 500)}\nfim`;
     expect(cleanTrace(raw)).toEqual(['fim']);
+  });
+});
+
+describe('9b. o teto de caractere não pode engolir o trace inteiro', () => {
+  it('UT-69 cauda sem newline nenhum mantém o conteúdo, não devolve vazio', () => {
+    // Regressão real: `firstBreak === -1` zerava a origem, cleanTrace devolvia
+    // [] e get_job_log dizia "trace veio vazio" — para exatamente a entrada que
+    // motivou o teto (bundle minificado, base64, JSON numa linha só).
+    const raw = `npm ERR! build failed\nError: cannot find module\n${'A'.repeat(MAX_TRACE_CHARS + 1000)}`;
+    const lines = cleanTrace(raw);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.join('')).toContain('AAAA');
+    expect(renderTrace(raw, 400).body).not.toBe('');
+  });
+
+  it('UT-70 corte por tamanho é declarado no aviso, não silencioso', () => {
+    const raw = `${'a'.repeat(MAX_TRACE_CHARS)}\nfim`;
+    const { notice } = renderTrace(raw, 400);
+    expect(notice).toBeDefined();
+    expect(notice).toContain('KB');
+  });
+
+  it('UT-71 o corpo devolvido respeita MAX_BODY_CHARS e conta o que cortou', () => {
+    const raw = Array.from({ length: 400 }, (_, i) => `${i} ${'x'.repeat(3000)}`).join('\n');
+    const { body, notice } = renderTrace(raw, 400);
+    expect(body.length).toBeLessThanOrEqual(MAX_BODY_CHARS);
+    expect(notice).toBeDefined();
+    expect(notice).toContain('linha(s) anterior(es) omitida(s)');
+  });
+
+  it('UT-72 maxLines NaN cai no default em vez de imprimir NaN', () => {
+    const { notice } = renderTrace(numbered(1000).join('\n'), Number.NaN);
+    expect(notice ?? '').not.toContain('NaN');
   });
 });
 

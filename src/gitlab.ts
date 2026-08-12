@@ -30,6 +30,8 @@ export interface Page {
 export interface GitLabResponse<T> {
   data: T;
   page: Page;
+  /** Caracteres descartados na leitura, quando `maxTextChars` limitou o corpo. */
+  droppedChars?: number;
 }
 
 export interface RequestOptions {
@@ -40,6 +42,13 @@ export interface RequestOptions {
   body?: unknown;
   /** Nome legível do recurso, usado nas mensagens de erro. Ex.: `projeto "grupo/x"`. */
   resource?: string;
+  /**
+   * Teto de caracteres na LEITURA do corpo. Sem isto, `res.text()` materializa
+   * a resposta inteira antes de qualquer corte — o limite default de trace no
+   * GitLab é 100 MB, ou ~200 MB em UTF-16 dentro do processo. Com o teto, o
+   * corpo é lido em streaming e só a cauda fica em memória.
+   */
+  maxTextChars?: number;
 }
 
 function buildUrl(path: string, query?: RequestOptions['query']): string {
@@ -175,6 +184,10 @@ async function request(path: string, opts: RequestOptions, accept: Accept): Prom
     const retryAfter = Number(res.headers.get('retry-after') ?? '');
     const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 60) * 1000 : 5000;
     log(`429 em ${resource}; aguardando ${waitMs}ms e tentando uma vez.`);
+    // Descarta o corpo antes de dormir. Sem isto o undici segura o socket e o
+    // buffer da resposta abandonada até o GC — num burst de rate limit, um
+    // socket preso por 429, cada um por até 60s.
+    await res.body?.cancel().catch(() => undefined);
     await sleep(waitMs);
     res = await attempt();
   }
@@ -192,11 +205,41 @@ async function request(path: string, opts: RequestOptions, accept: Accept): Prom
  * armado enquanto o corpo baixa: um trace grande em VPN lenta devolve 200 OK e
  * só então falha aqui.
  */
-async function readBody(res: Response, path: string, opts: RequestOptions): Promise<string> {
+async function readBody(
+  res: Response,
+  path: string,
+  opts: RequestOptions,
+): Promise<{ text: string; droppedChars: number }> {
   const cfg = getConfig();
   const resource = opts.resource ?? path;
   try {
-    return await res.text();
+    const max = opts.maxTextChars;
+    if (max === undefined) return { text: await res.text(), droppedChars: 0 };
+
+    // Streaming com cauda rolante: o pico fica em ~2x o teto, não no tamanho
+    // do corpo. `stream: true` no decoder evita partir caractere multibyte na
+    // borda de um chunk.
+    const stream = res.body;
+    if (stream === null) return { text: '', droppedChars: 0 };
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let acc = '';
+    let dropped = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      acc += decoder.decode(value, { stream: true });
+      if (acc.length > max * 2) {
+        dropped += acc.length - max;
+        acc = acc.slice(-max);
+      }
+    }
+    acc += decoder.decode();
+    if (acc.length > max) {
+      dropped += acc.length - max;
+      acc = acc.slice(-max);
+    }
+    return { text: acc, droppedChars: dropped };
   } catch (e) {
     const name = e instanceof Error ? e.name : '';
     if (name === 'TimeoutError' || name === 'AbortError') {
@@ -213,7 +256,7 @@ async function readBody(res: Response, path: string, opts: RequestOptions): Prom
 /** Uma chamada à API v4. Lança GitLabError já traduzido. */
 export async function gl<T>(path: string, opts: RequestOptions = {}): Promise<GitLabResponse<T>> {
   const res = await request(path, opts, 'application/json');
-  const text = await readBody(res, path, opts);
+  const { text } = await readBody(res, path, opts);
   const data = (text ? JSON.parse(text) : null) as T;
   return { data, page: readPage(res.headers) };
 }
@@ -224,5 +267,6 @@ export async function gl<T>(path: string, opts: RequestOptions = {}): Promise<Gi
  */
 export async function glText(path: string, opts: RequestOptions = {}): Promise<GitLabResponse<string>> {
   const res = await request(path, opts, 'text/plain');
-  return { data: await readBody(res, path, opts), page: readPage(res.headers) };
+  const { text, droppedChars } = await readBody(res, path, opts);
+  return { data: text, page: readPage(res.headers), droppedChars };
 }

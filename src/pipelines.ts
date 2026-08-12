@@ -2,7 +2,13 @@
 // Não importa gitlab.ts — invariante 4. É o que deixa a resposta inteira
 // testável com literal em vez de fixture de rede.
 
-import { inlineUntrusted, pick, untrusted, withUntrustedNote } from './format.js';
+import {
+  INLINE_UNTRUSTED_NOTE,
+  inlineUntrusted,
+  pick,
+  untrusted,
+  withUntrustedNote,
+} from './format.js';
 import type { TraceRender } from './trace.js';
 
 /** O que o GitLab devolve, do que a gente usa. */
@@ -81,6 +87,9 @@ export function newest(pipelines: RawPipeline[]): RawPipeline | undefined {
   return best;
 }
 
+/** Estados finais de um job. Fora daqui, ele ainda pode produzir saída. */
+const TERMINAL_STATUSES = new Set(['success', 'failed', 'canceled', 'skipped']);
+
 export type LogAvailability =
   | { kind: 'ready' }
   | { kind: 'never-started'; status: string }
@@ -93,8 +102,23 @@ export type LogAvailability =
  * Precedência fixa: nunca-começou vence log-apagado. Um job que não começou não
  * tinha log para apagar, então essa é a explicação verdadeira.
  */
+/** Estados em que o job comprovadamente ainda não rodou. */
+const NEVER_RAN_STATUSES = new Set([
+  'created',
+  'pending',
+  'manual',
+  'skipped',
+  'waiting_for_resource',
+  'scheduled',
+]);
+
 export function logAvailability(job: RawJob): LogAvailability {
-  if (job.started_at === null || job.started_at === undefined) {
+  // `started_at` ausente só significa "nunca começou" quando o status também
+  // diz isso. Colapsar ausência em null fazia um job `success` sem o campo
+  // responder "status success, nunca começou a executar" — contradição que o
+  // modelo não tem como enxergar. Na dúvida, tenta o trace e deixa o 404 falar.
+  const notStarted = job.started_at === null || job.started_at === undefined;
+  if (notStarted && NEVER_RAN_STATUSES.has(job.status)) {
     return { kind: 'never-started', status: job.status };
   }
   if (job.erased_at !== null && job.erased_at !== undefined) {
@@ -103,10 +127,17 @@ export function logAvailability(job: RawJob): LogAvailability {
   return { kind: 'ready' };
 }
 
-const shortSha = (sha: string | undefined): string => (sha ? sha.slice(0, 8) : '—');
+const shortSha = (sha: string | null | undefined): string => (sha ? sha.slice(0, 8) : '—');
 const dur = (d: number | null | undefined): string => (typeof d === 'number' ? `${d}s` : '—');
-/** Campo do servidor que pode faltar. Nunca é texto livre do usuário. */
-const val = (v: string | number | undefined): string => (v === undefined ? '—' : String(v));
+/**
+ * Campo do servidor que pode faltar. Nunca é texto livre do usuário.
+ *
+ * Trata null além de undefined: `pick()` descarta só undefined — de propósito,
+ * UT-24 depende disso para `duration: null` — então qualquer campo que a API
+ * mande como null chega aqui e viraria a string "null" na saída.
+ */
+const val = (v: string | number | null | undefined): string =>
+  v === undefined || v === null ? '—' : String(v);
 
 export function renderPipeline(p: PipelineView, jobs: JobView[], label: string, iid: number): string {
   const out: string[] = [
@@ -144,6 +175,10 @@ export function renderPipeline(p: PipelineView, jobs: JobView[], label: string, 
     }
   }
 
+  // Nome de job, stage, branch e failure_reason são escritos por quem abriu o
+  // MR e aparecem no meio de linhas que o servidor escreveu. inlineUntrusted
+  // impede que forjem uma linha; a nota é o que diz ao modelo que são dados.
+  out.push('', INLINE_UNTRUSTED_NOTE);
   return out.join('\n');
 }
 
@@ -162,7 +197,9 @@ export function renderPipelineList(items: PipelineView[], page: Record<string, u
       `#${val(p.id)} ${val(p.status)} ref=${inlineUntrusted(p.ref)} sha=${shortSha(p.sha)} ` +
       `source=${p.source ?? '—'} criado=${val(p.created_at)} ${val(p.web_url)}`,
   );
-  return [`Pipelines (${items.length} nesta página):`, ...lines, '', pageLine].join('\n');
+  return [`Pipelines (${items.length} nesta página):`, ...lines, '', pageLine, '', INLINE_UNTRUSTED_NOTE].join(
+    '\n',
+  );
 }
 
 /**
@@ -181,7 +218,14 @@ export function renderJobLog(job: JobView, trace: TraceRender): string {
   const notice = trace.notice ? `\n${trace.notice}` : '';
 
   if (trace.body === '') {
-    return `${header}${notice}\n\nJob ${val(job.id)} terminou com status ${val(job.status)} mas o trace veio vazio.`;
+    // "terminou" só quando terminou. Pedir o log de um job que acabou de subir
+    // é o primeiro movimento natural, e dizer que acabou é o oposto do que a
+    // descrição da tool promete ("chame de novo para atualizar").
+    const done = TERMINAL_STATUSES.has(job.status ?? '');
+    const verb = done
+      ? `terminou com status ${val(job.status)} mas o trace veio vazio`
+      : `está com status ${val(job.status)} e ainda não emitiu saída — chame de novo em instantes`;
+    return `${header}${notice}\n\nJob ${val(job.id)} ${verb}.`;
   }
 
   return withUntrustedNote(`${header}${notice}\n\n${untrusted('job_trace', trace.body)}`);

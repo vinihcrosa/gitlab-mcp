@@ -195,7 +195,7 @@ Se o passo 7 ou 8 falhar, a mensagem de erro diz quais linhas *de fato* existem 
 npm test
 ```
 
-62 casos, todos offline. Cobrem a lógica pura — onde saída errada parece plausível:
+Todos offline. Cobrem a lógica pura — onde saída errada parece plausível:
 
 - **`src/diff.ts`** — hunk misto, múltiplos hunks, arquivo novo/deletado/renomeado, `\ No newline at end of file`, truncamento em 400 linhas, binário. É o que quebra `comment_on_mr_line` quando erra.
 - **`src/trace.ts`** — ANSI (CSI e OSC), marcador de seção, prefixo de timestamp e de stream, colapso de barra de progresso, corte pela cauda em limite de linha.

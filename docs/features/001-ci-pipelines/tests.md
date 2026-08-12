@@ -47,6 +47,10 @@ so this contract can be written against literals. Every case below runs offline.
 | UT-54 | `"important error message\r"` | `["important error message"]` — a bare trailing CR must not empty the line |
 | UT-55 | `"a\rb\r"` | `["b"]` — last non-empty segment wins |
 | UT-56 | `"2026-…Z 00O   at Foo.Bar()"` | `["  at Foo.Bar()"]` — the separator is consumed once; indentation survives |
+| UT-69 | raw over `MAX_TRACE_CHARS` whose tail slice contains **no** newline | content survives, bounded by the per-line ceiling — **regression case**: this returned `[]` and reported "trace veio vazio" |
+| UT-70 | raw over `MAX_TRACE_CHARS` | the notice names the size cut in KB — a char cut must not be silent |
+| UT-71 | 400 lines of 3000 chars | body within `MAX_BODY_CHARS`; the lines dropped for size are counted in the notice |
+| UT-72 | `renderTrace(raw, NaN)` | falls back to the default; the notice never contains `NaN` |
 
 ## B. `tailLines` and `renderTrace` — truncation
 
@@ -121,6 +125,11 @@ so this contract can be written against literals. Every case below runs offline.
 | UT-61 | `renderPipeline({id: 7}, …)` — every other field absent | renders, with `—` for what is missing; does not throw |
 | UT-62 | a job view with only `id` | `padEnd` on an absent status does not throw |
 | UT-63 | a listing where one pipeline is incomplete | that row degrades; the other rows and the response survive |
+| UT-64 | job with `status: "success"` and **no** `started_at` key | `ready` — a job cannot both succeed and never have started; let the trace fetch speak |
+| UT-65 | job with no `started_at`, terminal status, and `erased_at` set | `erased` — the truthful explanation once the status rules out "never ran" |
+| UT-66 | job named `"build\u001b[2K\u001b[1Gfake"` | no escape byte reaches the output; the cursor cannot be moved over what the server wrote |
+| UT-67 | any `renderPipeline` / `renderPipelineList` response | carries `INLINE_UNTRUSTED_NOTE` — inline free text is neutralised *and* labelled |
+| UT-68 | a pipeline view whose fields are `null` rather than absent | renders `—`, never the string `null` — `pick()` preserves `null` by design |
 
 ## F. Registration — the tool surface
 
@@ -148,14 +157,15 @@ reached only from `assertWritable()` at call time, never during registration.
 | 1 ANSI absent | UT-01, UT-02, UT-12 |
 | 2 section markers absent | UT-03, UT-04 |
 | 3 carriage-return line appears once, and never vanishes | UT-05, UT-06, UT-54, UT-55 |
+| 3b no ceiling may silently empty or silently shrink the trace | UT-69, UT-70, UT-71, UT-72 |
 | 4 leading timestamp and stream prefix stripped, mid-line kept | UT-07, UT-08, UT-46, UT-47, UT-56 |
 | 5 interior blanks kept, trailing dropped | UT-09, UT-10 |
 | 6 under ceiling returns whole | UT-14, UT-18 |
 | 7 over ceiling returns the last N | UT-13, UT-17, UT-21 |
 | 8 notice states the count and precedes content | UT-17 |
 | 9 no fragment lines | UT-19 |
-| 9b free text from GitLab cannot forge server output | UT-58, UT-59, UT-60 |
-| 9c renderers are total over their declared types | UT-61, UT-62, UT-63 |
+| 9b free text from GitLab cannot forge server output | UT-58, UT-59, UT-60, UT-66, UT-67 |
+| 9c renderers are total over their declared types | UT-61, UT-62, UT-63, UT-68 |
 | 10 `max_lines` out of range rejected | UT-45 |
 | 10b character ceilings, per line and per trace | UT-51, UT-52, UT-53 |
 | 11 pipeline fields projected | UT-22, UT-23 |
@@ -165,7 +175,7 @@ reached only from `assertWritable()` at call time, never during registration.
 | 15 running pipeline lists finished jobs | UT-34 |
 | 16 highest id wins for one commit | UT-26 |
 | 17 log cleaned, bounded, wrapped untrusted | UT-39, UT-40, UT-41, UT-57, UT-58 |
-| 18 never-started reported, no trace call | UT-28, UT-31 |
+| 18 never-started reported, no trace call | UT-28, UT-31, UT-64, UT-65 |
 | 19 erased reported with web url, no trace call | UT-29 |
 | 20 permission failure names the scope | none — see exclusions |
 | 21 listing fields projected | UT-37 |
@@ -175,7 +185,7 @@ reached only from `assertWritable()` at call time, never during registration.
 | 25 build and existing suite pass | the existing 15 diff cases, unchanged |
 | 26 read-only still gates exactly three tools | UT-44 registration, UT-48 and UT-49 call time |
 
-63 cases. **The thinnest row is criterion 15** — one case for a running
+72 cases. **The thinnest row is criterion 15** — one case for a running
 pipeline, which is the state a reviewer hits most often in practice and the one
 with the most shapes (nothing started, some finished, one running, one manual).
 It is the first place to add a case when this feature grows.

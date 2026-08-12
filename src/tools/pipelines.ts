@@ -2,7 +2,7 @@
 // nenhuma faz POST, nenhuma é desabilitada por GITLAB_READ_ONLY.
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { gl, glText } from '../gitlab.js';
+import { gl, glText, log } from '../gitlab.js';
 import { GitLabError, ToolError } from '../errors.js';
 import { inlineUntrusted, pageBlock } from '../format.js';
 import { resolveProject } from '../projects.js';
@@ -17,37 +17,60 @@ import {
   toJobView,
   toPipelineView,
 } from '../pipelines.js';
-import { DEFAULT_TRACE_LINES, MAX_TRACE_LINES, renderTrace } from '../trace.js';
+import { DEFAULT_TRACE_LINES, MAX_TRACE_CHARS, MAX_TRACE_LINES, renderTrace } from '../trace.js';
 import { tool } from './register.js';
 
 /** Uma página de jobs. Paginar dentro de uma pipeline ficou adiado. */
 const JOBS_PER_PAGE = 100;
 
+/** Páginas de pipeline que a varredura aceita antes de desistir. */
+const MAX_PIPELINE_PAGES = 5;
+
 /**
- * Pipeline mais recente do MR. Pede ordenação decrescente por id E escolhe por
- * maior id localmente: a query cuida de qual página vem, o max local cuida de
- * não depender da ordem dentro dela.
+ * Pipeline mais recente do MR.
+ *
+ * Este endpoint NÃO aceita `order_by` nem `sort` — não estão declarados no
+ * `params` do Grape em `lib/api/merge_requests.rb`, então são descartados. E a
+ * ordem real não é `id DESC`: `PipelinesForMergeRequestFinder` ordena por
+ * `CASE source WHEN merge_request_event THEN 0 ELSE 1 END, id DESC`, ou seja,
+ * as de merge_request_event vêm todas primeiro. Num MR com mais de uma página
+ * delas, a pipeline mais nova pode ser de push e estar na página 2.
+ *
+ * Então varre as páginas e tira o máximo global, em vez de confiar na primeira.
  */
 export async function latestMrPipeline(projectId: number, iid: number, label: string): Promise<RawPipeline | undefined> {
-  const { data } = await gl<RawPipeline[]>(`/projects/${projectId}/merge_requests/${iid}/pipelines`, {
-    // Ordenação pedida explicitamente. Sem isto a página 1 depende da ordem
-    // default do endpoint, e um MR com mais de 20 pipelines — rotina em branch
-    // longa re-rodada várias vezes — poderia devolver as 20 mais VELHAS, com
-    // newest() apontando confiante para uma pipeline obsoleta. Errado e com
-    // cara de certo é pior que erro.
-    query: { per_page: 20, order_by: 'id', sort: 'desc' },
-    resource: `as pipelines do MR !${iid} de ${label}`,
-  });
-  // newest() continua: ordenação pedida é uma coisa, ordenação garantida é outra.
-  return newest(data ?? []);
+  const all: RawPipeline[] = [];
+  for (let page = 1; page <= MAX_PIPELINE_PAGES; page++) {
+    const res = await gl<RawPipeline[]>(`/projects/${projectId}/merge_requests/${iid}/pipelines`, {
+      query: { per_page: 100, page },
+      resource: `as pipelines do MR !${iid} de ${label}`,
+    });
+    const batch = res.data ?? [];
+    all.push(...batch);
+    const next = res.page.nextPage;
+    if (batch.length === 0 || !next || next <= 0) break;
+    if (page === MAX_PIPELINE_PAGES) {
+      log(`MR !${iid} de ${label} tem mais de ${MAX_PIPELINE_PAGES * 100} pipelines; a varredura parou aí.`);
+    }
+  }
+  return newest(all);
 }
 
-export async function pipelineJobs(projectId: number, pipelineId: number, label: string): Promise<RawJob[]> {
-  const { data } = await gl<RawJob[]>(`/projects/${projectId}/pipelines/${pipelineId}/jobs`, {
+export interface JobsPage {
+  jobs: RawJob[];
+  /** true só quando o GitLab diz que existe página seguinte. */
+  hasMore: boolean;
+}
+
+export async function pipelineJobs(projectId: number, pipelineId: number, label: string): Promise<JobsPage> {
+  const { data, page } = await gl<RawJob[]>(`/projects/${projectId}/pipelines/${pipelineId}/jobs`, {
     query: { per_page: JOBS_PER_PAGE, include_retried: false },
     resource: `os jobs da pipeline #${pipelineId} de ${label}`,
   });
-  return data ?? [];
+  // `x-next-page` distingue exatamente os dois casos. Comparar o tamanho da
+  // página com o teto errava para a pipeline com exatamente 100 jobs: mandava
+  // abrir o browser para jobs que já estavam na resposta.
+  return { jobs: data ?? [], hasMore: typeof page.nextPage === 'number' && page.nextPage > 0 };
 }
 
 /** Metadados do job. Vêm antes do trace, para distinguir "não rodou" de "apagado". */
@@ -125,11 +148,11 @@ export function registerPipelines(server: McpServer): void {
         return `MR !${iid} de ${label} não tem pipeline. Isso é estado válido: o projeto pode não ter CI, ou a branch não disparou nada.`;
       }
 
-      const jobs = await pipelineJobs(project.id, raw.id, label);
+      const { jobs, hasMore } = await pipelineJobs(project.id, raw.id, label);
       const body = renderPipeline(toPipelineView(raw), jobs.map(toJobView), label, iid);
 
-      if (jobs.length < JOBS_PER_PAGE) return body;
-      return `${body}\n\n[esta pipeline tem ${JOBS_PER_PAGE} jobs ou mais; só a primeira página aparece acima — veja ${raw.web_url}]`;
+      if (!hasMore) return body;
+      return `${body}\n\n[esta pipeline tem mais de ${JOBS_PER_PAGE} jobs; só a primeira página aparece acima — veja ${raw.web_url}]`;
     },
   );
 
@@ -161,11 +184,16 @@ export function registerPipelines(server: McpServer): void {
       }
 
       let trace: string;
+      let droppedOnRead = 0;
       try {
         const res = await glText(`/projects/${project.id}/jobs/${jobId}/trace`, {
           resource: `o log do job ${jobId} de ${label}`,
+          // Lê em streaming e guarda só a cauda: o limite default de trace no
+          // GitLab é 100 MB, e res.text() materializaria tudo.
+          maxTextChars: MAX_TRACE_CHARS,
         });
         trace = res.data;
+        droppedOnRead = res.droppedChars ?? 0;
       } catch (e) {
         if (e instanceof GitLabError && e.status === 404) {
           throw new GitLabError(
@@ -177,7 +205,7 @@ export function registerPipelines(server: McpServer): void {
         throw e;
       }
 
-      return renderJobLog(toJobView(job), renderTrace(trace, maxLines));
+      return renderJobLog(toJobView(job), renderTrace(trace, maxLines, droppedOnRead));
     },
   );
 

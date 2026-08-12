@@ -149,7 +149,10 @@ export interface TraceRender {
   notice?: string;
 }
 
-export function renderTrace(raw: string, maxLines?: number): TraceRender;
+export function renderTrace(raw: string, maxLines?: number, droppedBeforeRead?: number): TraceRender;
+
+/** Bounds the body actually returned, after the line cut. */
+export const MAX_BODY_CHARS = 60_000;
 
 /** Ceilings a line count cannot enforce: one huge line, or a huge trace. */
 export const MAX_TRACE_CHARS = 512_000;
