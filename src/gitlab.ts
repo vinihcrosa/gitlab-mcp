@@ -139,14 +139,17 @@ async function request(path: string, opts: RequestOptions, accept: Accept): Prom
   const resource = opts.resource ?? path;
   const url = buildUrl(path, opts.query);
 
-  let res: Response;
-  try {
-    res = await once(url, opts, accept);
-  } catch (e) {
+  /**
+   * Traduz falha de rede/timeout. Toda ida à rede passa por aqui — inclusive a
+   * segunda tentativa do 429 e a leitura do corpo. Deixar qualquer uma de fora
+   * faz um DOMException cru chegar ao modelo, sem citar GITLAB_TIMEOUT_MS,
+   * GITLAB_URL nem GITLAB_CA_CERT.
+   */
+  const translate = (e: unknown): never => {
     const name = e instanceof Error ? e.name : '';
     if (name === 'TimeoutError' || name === 'AbortError') {
       throw new GitLabError(
-        `Timeout de ${cfg.timeoutMs}ms falando com ${cfg.url} (${resource}). Aumente GITLAB_TIMEOUT_MS ou verifique rede/VPN.`,
+        `Timeout de ${cfg.timeoutMs}ms falando com ${cfg.url} (${resource}). Aumente GITLAB_TIMEOUT_MS ou verifique rede/VPN. Se o corpo for grande, reduza max_lines.`,
         0,
       );
     }
@@ -155,7 +158,17 @@ async function request(path: string, opts: RequestOptions, accept: Accept): Prom
       `Não consegui falar com ${cfg.url} (${resource}): ${detail}. Verifique GITLAB_URL, rede/VPN e GITLAB_CA_CERT se o cert for privado.`,
       0,
     );
-  }
+  };
+
+  const attempt = async (): Promise<Response> => {
+    try {
+      return await once(url, opts, accept);
+    } catch (e) {
+      return translate(e);
+    }
+  };
+
+  let res = await attempt();
 
   // 429: respeita Retry-After, tenta uma vez, depois desiste.
   if (res.status === 429) {
@@ -163,7 +176,7 @@ async function request(path: string, opts: RequestOptions, accept: Accept): Prom
     const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter, 60) * 1000 : 5000;
     log(`429 em ${resource}; aguardando ${waitMs}ms e tentando uma vez.`);
     await sleep(waitMs);
-    res = await once(url, opts, accept);
+    res = await attempt();
   }
 
   if (!res.ok) {
@@ -174,10 +187,33 @@ async function request(path: string, opts: RequestOptions, accept: Accept): Prom
   return res;
 }
 
+/**
+ * Lê o corpo com a mesma tradução de erro. O AbortSignal do timeout continua
+ * armado enquanto o corpo baixa: um trace grande em VPN lenta devolve 200 OK e
+ * só então falha aqui.
+ */
+async function readBody(res: Response, path: string, opts: RequestOptions): Promise<string> {
+  const cfg = getConfig();
+  const resource = opts.resource ?? path;
+  try {
+    return await res.text();
+  } catch (e) {
+    const name = e instanceof Error ? e.name : '';
+    if (name === 'TimeoutError' || name === 'AbortError') {
+      throw new GitLabError(
+        `Timeout de ${cfg.timeoutMs}ms baixando a resposta de ${resource}. Aumente GITLAB_TIMEOUT_MS, verifique rede/VPN, ou peça menos dados (max_lines menor).`,
+        0,
+      );
+    }
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new GitLabError(`Falha lendo a resposta de ${resource}: ${detail}.`, 0);
+  }
+}
+
 /** Uma chamada à API v4. Lança GitLabError já traduzido. */
 export async function gl<T>(path: string, opts: RequestOptions = {}): Promise<GitLabResponse<T>> {
   const res = await request(path, opts, 'application/json');
-  const text = await res.text();
+  const text = await readBody(res, path, opts);
   const data = (text ? JSON.parse(text) : null) as T;
   return { data, page: readPage(res.headers) };
 }
@@ -188,5 +224,5 @@ export async function gl<T>(path: string, opts: RequestOptions = {}): Promise<Gi
  */
 export async function glText(path: string, opts: RequestOptions = {}): Promise<GitLabResponse<string>> {
   const res = await request(path, opts, 'text/plain');
-  return { data: await res.text(), page: readPage(res.headers) };
+  return { data: await readBody(res, path, opts), page: readPage(res.headers) };
 }

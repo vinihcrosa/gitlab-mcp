@@ -143,7 +143,17 @@ export function tailLines(lines: string[], maxLines: number): TraceTail;
  * notice, when there is one, sits at the top — the kept content is the tail,
  * so the omission is above it.
  */
-export function renderTrace(raw: string, maxLines?: number): string;
+export interface TraceRender {
+  body: string;
+  /** Present only when lines were dropped. Rendered OUTSIDE the envelope. */
+  notice?: string;
+}
+
+export function renderTrace(raw: string, maxLines?: number): TraceRender;
+
+/** Ceilings a line count cannot enforce: one huge line, or a huge trace. */
+export const MAX_TRACE_CHARS = 512_000;
+export const MAX_LINE_CHARS = 2_000;
 ```
 
 ### Pure pipeline logic
@@ -194,7 +204,7 @@ export function renderPipelineList(items: PipelineView[], page: Record<string, u
  * carrying the note. Wrapping lives here, not in the tool, so invariant 7 is
  * checkable without a network fixture.
  */
-export function renderJobLog(job: JobView, traceBody: string): string;
+export function renderJobLog(job: JobView, trace: TraceRender): string;
 ```
 
 ### Tools

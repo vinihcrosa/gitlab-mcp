@@ -3,8 +3,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { gl, glText } from '../gitlab.js';
-import { GitLabError } from '../errors.js';
-import { pageBlock } from '../format.js';
+import { GitLabError, ToolError } from '../errors.js';
+import { inlineUntrusted, pageBlock } from '../format.js';
 import { resolveProject } from '../projects.js';
 import {
   type RawJob,
@@ -24,14 +24,21 @@ import { tool } from './register.js';
 const JOBS_PER_PAGE = 100;
 
 /**
- * Pipeline mais recente do MR. Busca uma página e escolhe por maior id — a
- * ordem que o endpoint devolve não é contratual.
+ * Pipeline mais recente do MR. Pede ordenação decrescente por id E escolhe por
+ * maior id localmente: a query cuida de qual página vem, o max local cuida de
+ * não depender da ordem dentro dela.
  */
 export async function latestMrPipeline(projectId: number, iid: number, label: string): Promise<RawPipeline | undefined> {
   const { data } = await gl<RawPipeline[]>(`/projects/${projectId}/merge_requests/${iid}/pipelines`, {
-    query: { per_page: 20 },
+    // Ordenação pedida explicitamente. Sem isto a página 1 depende da ordem
+    // default do endpoint, e um MR com mais de 20 pipelines — rotina em branch
+    // longa re-rodada várias vezes — poderia devolver as 20 mais VELHAS, com
+    // newest() apontando confiante para uma pipeline obsoleta. Errado e com
+    // cara de certo é pior que erro.
+    query: { per_page: 20, order_by: 'id', sort: 'desc' },
     resource: `as pipelines do MR !${iid} de ${label}`,
   });
+  // newest() continua: ordenação pedida é uma coisa, ordenação garantida é outra.
   return newest(data ?? []);
 }
 
@@ -48,6 +55,14 @@ export async function fetchJob(projectId: number, jobId: number, label: string):
   const { data } = await gl<RawJob>(`/projects/${projectId}/jobs/${jobId}`, {
     resource: `o job ${jobId} de ${label}`,
   });
+  // gl() devolve null para corpo vazio (204 ou 200 sem body). Sem este guard o
+  // null desce até logAvailability e vira um TypeError cru — inútil, do lado
+  // dos 403/404 que foram traduzidos com cuidado.
+  if (data === null || data === undefined) {
+    throw new ToolError(
+      `Job ${jobId} de ${label}: o GitLab respondeu sem corpo. Confirme o id em get_mr_pipeline — ele é global, não o índice do job na pipeline.`,
+    );
+  }
   return data;
 }
 
@@ -122,7 +137,7 @@ export function registerPipelines(server: McpServer): void {
     server,
     'get_job_log',
     [
-      'Log do job de CI, já sem códigos ANSI, sem marcadores de seção e sem prefixo de timestamp.',
+      'Log do job de CI, já sem códigos ANSI, sem marcadores de seção e sem prefixo de timestamp/stream.',
       'Devolve o FIM do log, não o começo: build quebra no fim, e é lá que está a causa.',
       `Default de ${DEFAULT_TRACE_LINES} linhas. Se a saída disser que cortou e o erro não estiver visível, chame de novo com max_lines maior.`,
       'Pegue o job_id em get_mr_pipeline — ele imprime a chamada pronta para cada job que falhou.',
@@ -139,10 +154,10 @@ export function registerPipelines(server: McpServer): void {
       const availability = logAvailability(job);
 
       if (availability.kind === 'never-started') {
-        return `Job ${jobId} (${job.name}) não produziu log: status ${availability.status}, nunca começou a executar.`;
+        return `Job ${jobId} (${inlineUntrusted(job.name, 80)}) não produziu log: status ${availability.status}, nunca começou a executar.`;
       }
       if (availability.kind === 'erased') {
-        return `Job ${jobId} (${job.name}) teve o log apagado em ${availability.erasedAt}. Veja ${availability.webUrl} se ainda houver algo lá.`;
+        return `Job ${jobId} (${inlineUntrusted(job.name, 80)}) teve o log apagado em ${availability.erasedAt}. Veja ${availability.webUrl} se ainda houver algo lá.`;
       }
 
       let trace: string;

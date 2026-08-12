@@ -3,6 +3,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { registerAll } from '../src/tools/index.js';
 import { jobLogSchema } from '../src/tools/pipelines.js';
+import { assertWritable } from '../src/tools/register.js';
+import { isReadOnly, loadConfig } from '../src/config.js';
 
 /**
  * Servidor falso: só anota o nome de cada tool registrada. Serve porque todo
@@ -51,16 +53,70 @@ describe('15. superfície de tools', () => {
   });
 
   it('UT-44 read-only não muda o registro — o guard é em tempo de chamada', () => {
-    const previous = process.env.GITLAB_READ_ONLY;
-    process.env.GITLAB_READ_ONLY = 'true';
-    try {
+    withEnv({ GITLAB_READ_ONLY: 'true' }, () => {
+      loadConfig();
       const { server, names } = recorder();
       registerAll(server);
       expect(names).toHaveLength(13);
       for (const name of NEW) expect(names).toContain(name);
-    } finally {
-      if (previous === undefined) delete process.env.GITLAB_READ_ONLY;
-      else process.env.GITLAB_READ_ONLY = previous;
+    });
+  });
+});
+
+/**
+ * Troca env, recarrega config, restaura. `loadConfig()` é o único ponto que
+ * popula `cfg` — sem chamá-lo, mexer em process.env não influencia assertion
+ * nenhuma, que era o defeito do UT-44 original.
+ */
+function withEnv(vars: Record<string, string>, body: () => void): void {
+  const previous: Record<string, string | undefined> = {};
+  const base = { GITLAB_URL: 'https://gitlab.exemplo.test', GITLAB_TOKEN: 'glpat-teste', ...vars };
+  for (const [k, v] of Object.entries(base)) {
+    previous[k] = process.env[k];
+    process.env[k] = v;
+  }
+  try {
+    body();
+  } finally {
+    for (const [k, v] of Object.entries(previous)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    // Sem recarregar: o ambiente real do processo de teste não tem GITLAB_URL,
+    // e loadConfig() chama process.exit(1) quando a validação falha. A config
+    // carregada fica como estava; cada caso que depende dela chama loadConfig()
+    // dentro do próprio withEnv.
+  }
+}
+
+describe('17. o guard de escrita em tempo de chamada', () => {
+  it('UT-48 read-only faz assertWritable lançar, com a mensagem exata', () => {
+    withEnv({ GITLAB_READ_ONLY: 'true' }, () => {
+      loadConfig();
+      expect(isReadOnly()).toBe(true);
+      expect(() => assertWritable()).toThrowError(
+        'Escrita desabilitada. Defina GITLAB_READ_ONLY=false para habilitar.',
+      );
+    });
+  });
+
+  it('UT-49 a comparação é case-insensitive e com trim; qualquer outro valor é read-only', () => {
+    // Comportamento REAL de src/config.ts:66 — `.trim().toLowerCase() !== 'false'`.
+    // README.md:11 e AGENTS.md §7 dizem "só o literal 'false' (exato)", o que
+    // não bate: 'FALSE' e ' false ' também liberam. Divergência pré-existente,
+    // fora do escopo desta feature; este caso fixa o que o código faz hoje para
+    // que uma mudança futura seja deliberada em vez de silenciosa.
+    for (const liberating of ['false', 'FALSE', ' false ']) {
+      withEnv({ GITLAB_READ_ONLY: liberating }, () => {
+        loadConfig();
+        expect(() => assertWritable(), `valor ${JSON.stringify(liberating)}`).not.toThrow();
+      });
+    }
+    for (const value of ['0', 'no', '', 'true']) {
+      withEnv({ GITLAB_READ_ONLY: value }, () => {
+        loadConfig();
+        expect(() => assertWritable(), `valor ${JSON.stringify(value)}`).toThrow();
+      });
     }
   });
 });

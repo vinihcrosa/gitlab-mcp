@@ -34,11 +34,34 @@ export function username(user: unknown): string | undefined {
 }
 
 /**
+ * Neutraliza o delimitador do envelope dentro do próprio conteúdo. Sem isto,
+ * qualquer texto que contenha `</untrusted>` fecha o bloco mais cedo e o que
+ * vem depois chega ao modelo como texto confiável — trace de job é literalmente
+ * stdout de um script escrito por quem abriu o MR.
+ */
+function defuseDelimiter(content: string): string {
+  return content.replace(/<(\/?)untrusted(\s|>)/gi, (_m, slash: string, tail: string) => {
+    return `&lt;${slash}untrusted${tail === '>' ? '&gt;' : tail}`;
+  });
+}
+
+/**
  * Envolve conteúdo escrito por usuários do GitLab. Não é blindagem — é o mínimo
  * defensável, e barato.
  */
 export function untrusted(source: string, content: string): string {
-  return `<untrusted source="gitlab:${source}">\n${content}\n</untrusted>`;
+  return `<untrusted source="gitlab:${source}">\n${defuseDelimiter(content)}\n</untrusted>`;
+}
+
+/**
+ * Texto livre do GitLab usado *inline*, no meio de uma linha que o servidor
+ * escreveu: nome de job, stage, branch. Não cabe envelope de várias linhas
+ * aqui, e o vetor é outro — uma quebra de linha deixa o atacante forjar uma
+ * linha inteira de servidor. Então mata quebra de linha e o delimitador.
+ */
+export function inlineUntrusted(text: string | undefined, max = 120): string {
+  const flat = defuseDelimiter(String(text ?? '')).replace(/[\r\n\t]+/g, ' ');
+  return flat.length <= max ? flat : `${flat.slice(0, max)}…`;
 }
 
 export const UNTRUSTED_NOTE =

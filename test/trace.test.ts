@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_TRACE_LINES, cleanTrace, renderTrace, tailLines } from '../src/trace.js';
+import {
+  DEFAULT_TRACE_LINES,
+  MAX_LINE_CHARS,
+  MAX_TRACE_CHARS,
+  cleanTrace,
+  renderTrace,
+  tailLines,
+} from '../src/trace.js';
 
 const ESC = '\x1b';
 const BEL = '\x07';
@@ -104,30 +111,37 @@ describe('6. tailLines — corte', () => {
 describe('7. renderTrace — aviso e integridade', () => {
   const raw = numbered(500).join('\n');
 
-  it('UT-17 acima do teto: aviso com a contagem, depois exatamente maxLines linhas', () => {
-    const out = renderTrace(raw, 400).split('\n');
-    expect(out[0]).toContain('100');
-    expect(out[0]).toMatch(/^\[truncado:/);
-    expect(out.length - 1).toBe(400);
-    expect(out[1]).toBe('101');
-    expect(out[out.length - 1]).toBe('500');
+  it('UT-17 acima do teto: aviso separado com a contagem, e exatamente maxLines linhas no corpo', () => {
+    const { body, notice } = renderTrace(raw, 400);
+    expect(notice).toContain('100');
+    expect(notice).toMatch(/^\[truncado:/);
+    const lines = body.split('\n');
+    expect(lines).toHaveLength(400);
+    expect(lines[0]).toBe('101');
+    expect(lines[lines.length - 1]).toBe('500');
   });
 
   it('UT-18 abaixo do teto não emite aviso', () => {
-    const out = renderTrace(numbered(12).join('\n'), 400).split('\n');
-    expect(out.some((l) => l.startsWith('[truncado:'))).toBe(false);
-    expect(out).toHaveLength(12);
+    const { body, notice } = renderTrace(numbered(12).join('\n'), 400);
+    expect(notice).toBeUndefined();
+    expect(body.split('\n')).toHaveLength(12);
   });
 
   it('UT-19 toda linha devolvida é idêntica a uma linha limpa de origem — nenhum fragmento', () => {
     const source = new Set(cleanTrace(raw));
-    const out = renderTrace(raw, 400).split('\n').slice(1);
-    for (const line of out) expect(source.has(line)).toBe(true);
+    for (const line of renderTrace(raw, 400).body.split('\n')) expect(source.has(line)).toBe(true);
   });
 
   it('UT-20 sem maxLines usa o default de 400', () => {
     expect(DEFAULT_TRACE_LINES).toBe(400);
-    expect(renderTrace(raw)).toBe(renderTrace(raw, 400));
+    expect(renderTrace(raw)).toEqual(renderTrace(raw, 400));
+  });
+
+  it('UT-50 o aviso fica FORA do corpo — nada de instrução de servidor dentro do envelope', () => {
+    const { body, notice } = renderTrace(raw, 400);
+    expect(notice).toBeDefined();
+    expect(body).not.toContain('truncado');
+    expect(body).not.toContain('max_lines');
   });
 });
 
@@ -142,8 +156,46 @@ describe('8. renderTrace — o trace que motivou a feature', () => {
     const raw = [...filler, FAILURE].join('\n');
     expect(raw.length).toBeGreaterThan(500_000);
 
-    const out = renderTrace(raw, 400).split('\n');
-    expect(out[out.length - 1]).toBe(FAILURE);
-    expect(out[0]).toMatch(/^\[truncado:/);
+    const { body, notice } = renderTrace(raw, 400);
+    const lines = body.split('\n');
+    expect(lines[lines.length - 1]).toBe(FAILURE);
+    expect(notice).toMatch(/^\[truncado:/);
+  });
+});
+
+describe('9. tetos de caractere — o que teto de linha não segura', () => {
+  it('UT-51 uma única linha gigante é cortada por caractere', () => {
+    const huge = 'x'.repeat(50_000);
+    const [line] = cleanTrace(huge);
+    expect(line!.length).toBeLessThan(MAX_LINE_CHARS + 100);
+    expect(line).toContain('linha truncada');
+  });
+
+  it('UT-52 trace acima do teto de caracteres perde o começo, não o fim', () => {
+    const raw = `${'a'.repeat(MAX_TRACE_CHARS)}\nMARCADOR FINAL`;
+    const cleaned = cleanTrace(raw);
+    expect(cleaned[cleaned.length - 1]).toBe('MARCADOR FINAL');
+    expect(cleaned.join('\n').length).toBeLessThanOrEqual(MAX_TRACE_CHARS);
+  });
+
+  it('UT-53 a primeira linha do recorte, provavelmente partida ao meio, é descartada', () => {
+    const raw = `${'z'.repeat(MAX_TRACE_CHARS + 500)}\nfim`;
+    expect(cleanTrace(raw)).toEqual(['fim']);
+  });
+});
+
+describe('10. linha terminada em retorno de carro solto', () => {
+  it('UT-54 não some — vale o último segmento não-vazio', () => {
+    expect(cleanTrace('important error message\r')).toEqual(['important error message']);
+  });
+
+  it('UT-55 vários \\r com o último vazio ainda devolve o texto', () => {
+    expect(cleanTrace('a\rb\r')).toEqual(['b']);
+  });
+});
+
+describe('11. indentação preservada', () => {
+  it('UT-56 marcador de stream não come coluna de indentação', () => {
+    expect(cleanTrace('2026-08-10T18:52:30.272008Z 00O   at Foo.Bar()')).toEqual(['  at Foo.Bar()']);
   });
 });
