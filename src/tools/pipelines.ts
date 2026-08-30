@@ -4,7 +4,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { gl, glText, log } from '../gitlab.js';
 import { GitLabError, ToolError } from '../errors.js';
-import { inlineUntrusted, pageBlock } from '../format.js';
+import { inlineUntrusted, pageBlock, withInlineNote } from '../format.js';
 import { resolveProject } from '../projects.js';
 import {
   type RawJob,
@@ -17,7 +17,6 @@ import {
   toJobView,
   toPipelineView,
   val,
-  withInlineNote,
 } from '../pipelines.js';
 import { DEFAULT_TRACE_LINES, MAX_TRACE_CHARS, MAX_TRACE_LINES, renderTrace } from '../trace.js';
 import { tool } from './register.js';

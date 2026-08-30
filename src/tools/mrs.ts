@@ -1,7 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { gl } from '../gitlab.js';
-import { json, pageBlock, truncate, untrusted, username, usernames, withUntrustedNote } from '../format.js';
+import { json, pageBlock, withInlineNote, withUntrustedNote } from '../format.js';
+import { getMrView, listItemView } from '../mrs.js';
 import { projectPathById, projectPathFromMr, resolveProject } from '../projects.js';
 import { getMe } from './whoami.js';
 import { tool } from './register.js';
@@ -28,22 +29,18 @@ export async function fetchMr(projectId: number, iid: number, projectLabel: stri
   return data;
 }
 
-// Whitelist de listagem. `description` fica de fora de propósito — só em get_mr.
-async function listItem(mr: Record<string, unknown>): Promise<Record<string, unknown>> {
+/**
+ * Só resolve o path do projeto — que custa rede — e delega a projeção a
+ * `listItemView` em src/mrs.ts, onde a marcação de texto livre mora e é
+ * testável sem fixture.
+ */
+async function listItem(
+  mr: Record<string, unknown>,
+  includeAuthor = false,
+): Promise<Record<string, unknown>> {
   const projectPath =
     projectPathFromMr(mr as never) ?? (await projectPathById(mr.project_id as number));
-  return {
-    project_path: projectPath,
-    iid: mr.iid,
-    title: mr.title,
-    web_url: mr.web_url,
-    source_branch: mr.source_branch,
-    target_branch: mr.target_branch,
-    draft: mr.draft ?? mr.work_in_progress ?? false,
-    updated_at: mr.updated_at,
-    reviewers: usernames(mr.reviewers),
-    merge_status: mr.merge_status ?? mr.detailed_merge_status,
-  };
+  return listItemView(mr, projectPath, includeAuthor);
 }
 
 const listSchema = {
@@ -96,7 +93,8 @@ export function registerMrs(server: McpServer): void {
 
       const items = [];
       for (const mr of data ?? []) items.push(await listItem(mr));
-      return json({ ...pageBlock(perPage, page), items });
+      // title e branches são texto livre de quem abriu o MR, ver src/mrs.ts.
+      return withInlineNote(json({ ...pageBlock(perPage, page), items }));
     },
   );
 
@@ -127,10 +125,8 @@ export function registerMrs(server: McpServer): void {
       });
 
       const items = [];
-      for (const mr of data ?? []) {
-        items.push({ ...(await listItem(mr)), author: username(mr.author) });
-      }
-      return json({ reviewer: me.username, ...pageBlock(perPage, page), items });
+      for (const mr of data ?? []) items.push(await listItem(mr, true));
+      return withInlineNote(json({ reviewer: me.username, ...pageBlock(perPage, page), items }));
     },
   );
 
@@ -149,37 +145,9 @@ export function registerMrs(server: McpServer): void {
       const iid = args.iid as number;
       const mr = await fetchMr(project.id, iid, project.path_with_namespace);
 
-      const pipeline = (mr.head_pipeline ?? mr.pipeline) as { status?: string } | null | undefined;
-      const refs = mr.diff_refs ?? null;
-
-      const out: Record<string, unknown> = {
-        project_path: project.path_with_namespace,
-        iid: mr.iid,
-        title: mr.title,
-        description: untrusted('mr_description', truncate(mr.description as string | null, 4000)),
-        state: mr.state,
-        draft: mr.draft ?? mr.work_in_progress ?? false,
-        author: username(mr.author),
-        reviewers: usernames(mr.reviewers),
-        assignees: usernames(mr.assignees),
-        source_branch: mr.source_branch,
-        target_branch: mr.target_branch,
-        web_url: mr.web_url,
-        created_at: mr.created_at,
-        updated_at: mr.updated_at,
-        merge_status: mr.merge_status ?? mr.detailed_merge_status,
-        has_conflicts: mr.has_conflicts ?? null,
-        changes_count: mr.changes_count ?? null,
-        diff_refs: refs,
-        pipeline_status: pipeline?.status ?? null,
-      };
-
-      if (!refs) {
-        out.diff_refs_note =
-          'diff_refs veio null — este MR não tem diff utilizável (sem commits ou ainda sendo preparado). comment_on_mr_line não vai funcionar aqui; use comment_on_mr.';
-      }
-
-      return withUntrustedNote(json(out));
+      // Duas notas porque há duas formas de marcação na mesma resposta:
+      // `description` sai em envelope, `title`/branches saem inline.
+      return withInlineNote(withUntrustedNote(json(getMrView(mr, project.path_with_namespace))));
     },
   );
 }

@@ -44,6 +44,7 @@ gitlab-mcp/
 │   ├── diff.ts           # parser de diff unificado — lógica pura, sem I/O
 │   ├── trace.ts          # limpeza e corte pela cauda de trace — lógica pura, sem I/O
 │   ├── pipelines.ts      # projeção/decisão/renderização de CI — lógica pura, sem I/O
+│   ├── mrs.ts            # projeção e marcação de MR — lógica pura, sem I/O
 │   ├── format.ts         # pick/truncate/untrusted/pageBlock — projeção de saída
 │   ├── projects.ts       # resolução e cache de projetos (path <-> id)
 │   └── tools/
@@ -60,6 +61,7 @@ gitlab-mcp/
 │   ├── diff.test.ts      # parser de diff
 │   ├── trace.test.ts     # limpeza e corte de trace
 │   ├── pipelines.test.ts # projeção, decisão e renderização de CI
+│   ├── mrs.test.ts       # classificação e marcação dos campos de MR
 │   ├── gitlab.test.ts    # parse do corpo 2xx que não é JSON
 │   └── register.test.ts  # superfície de tools registradas
 └── dist/                 # saída compilada do tsc — nunca edite à mão
@@ -96,7 +98,7 @@ Estes invariantes vêm diretamente do código. Cada um deles tem consequência c
 - **`diff_refs` sempre frescos.** `comment_on_mr_line` rebusca o MR na hora de comentar em vez de aceitar shas como parâmetro: se alguém deu push desde a última leitura, os shas mudaram e a posição fica inválida (`src/tools/write.ts`).
 - **Validação local antes do POST.** `comment_on_mr_line` valida `file_path`, `line` e `side` contra o diff parseado localmente antes de postar — erro de API que o modelo não sabe corrigir vira loop de retry. Os números `old=`/`new=` impressos por `get_mr_diff` são exatamente o que a tool espera.
 - **Nenhuma tool devolve JSON cru do GitLab.** Toda saída passa por whitelist explícita (`pick()`, `PROJECT_FIELDS`, `listItem`) e truncamento (`truncate()`) em `src/format.ts`. Chaves ausentes na origem somem da saída.
-- **Conteúdo de usuário é marcado como não confiável.** Descrições de MR e corpos de notas são envolvidos em `<untrusted source="gitlab:...">` via `untrusted()`, e a resposta ganha a `UNTRUSTED_NOTE` uma única vez quando contém algum bloco untrusted (`src/format.ts`).
+- **Conteúdo de usuário é marcado como não confiável, e a regra é uma só.** Todo campo escrito por quem abriu o MR é marcado, independente da tool por onde sai: descrição de MR e corpo de nota em envelope `<untrusted source="gitlab:...">` via `untrusted()`; título de MR, `source_branch`, `target_branch`, `ref` de pipeline, nome de job, stage e `failure_reason` via `inlineUntrusted()`. A resposta ganha `UNTRUSTED_NOTE` quando contém envelope e `INLINE_UNTRUSTED_NOTE` quando carrega campo inline (`src/format.ts`). A classificação de cada campo de MR mora em `src/mrs.ts` (`MR_FREE_TEXT_KEYS` × `MR_LIST_SERVER_KEYS`/`MR_GET_SERVER_KEYS`) e `test/mrs.test.ts` quebra se um campo novo sair sem classificação.
 - **Toda listagem pagina e diz se tem mais.** O bloco `pageBlock()` (page, per_page, total_pages, has_more, next_page) acompanha toda listagem.
 - **Fallback para GitLab < 15.7.** Se `GET /diffs` devolver 404, o servidor lembra disso pelo resto do processo e passa a usar `GET /changes` com paginação local (`src/tools/diff.ts`).
 - **Varredura de diff é limitada.** `loadAllDiffFiles` varre no máximo 3 páginas de 100 arquivos (`MAX_SCAN_PAGES`). A renderização trunca em 400 linhas por arquivo e 1500 no total, sempre em limite de linha — nunca no meio de uma (`src/diff.ts`).
@@ -130,6 +132,7 @@ Estes invariantes vêm diretamente do código. Cada um deles tem consequência c
   - `inlineUntrusted()` + `INLINE_UNTRUSTED_NOTE` para texto livre *no meio* de uma linha que o servidor escreveu: nome de job, stage, branch, `failure_reason`. Envelope não cabe aí; a função neutraliza ANSI, quebra de linha e o delimitador, e a nota rotula a resposta.
   - A ordem dentro de `inlineUntrusted` é o controle: ANSI sai **antes** do delimitador. Invertida, um ESC plantado no token derrota o escape e o strip de ANSI depois fabrica um delimitador vivo.
   - Todo campo novo de texto livre vindo do GitLab passa por uma das duas. Nenhum vai cru para a saída.
+  - **A escolha é pela forma da saída, nunca pela tool.** `source_branch` de `get_mr` e `ref` de `get_mr_pipeline` são a mesma string escrita pela mesma pessoa: ou as duas são marcadas, ou nenhuma. Marcar num módulo e não no outro foi a issue #11, e o que a torna fácil de reintroduzir é justamente decidir campo a campo. Ver o bloco `REGRA ÚNICA DE MARCAÇÃO` em `src/mrs.ts` e `docs/adr/2026-08-30-mr-title-and-branch-names-are-untrusted.md`.
 - Escopos de token documentados em `.env.example`: `read_api` cobre as tools 1–7, 11 e 13; `api` é obrigatório para as três tools de escrita. `get_job_log` (12) exige `api` **por precaução, não por medida** — não foi verificado se `read_api` alcança `/jobs/:id/trace`.
 - Segredos ficam fora do repositório: use um `.env` local baseado em `.env.example`. Nunca faça commit de token, `.env` ou qualquer credencial.
 
@@ -177,7 +180,7 @@ Antes de considerar qualquer tarefa concluída neste repositório, verifique cad
 - [ ] Toda tool nova foi registrada em `src/tools/index.ts` via `registerAll`.
 - [ ] Toda tool nova de escrita chama `assertWritable()` antes de tocar na rede.
 - [ ] Saídas novas usam whitelist (`pick()` ou objeto explícito) — nada de JSON cru do GitLab.
-- [ ] Texto livre vindo de usuários do GitLab está envolvido por `untrusted()` e a resposta usa `withUntrustedNote()`.
+- [ ] Texto livre vindo de usuários do GitLab está marcado: `untrusted()` + `withUntrustedNote()` para bloco, `inlineUntrusted()` + `withInlineNote()` para inline. Campo novo de MR está classificado em `src/mrs.ts`.
 - [ ] Mensagens de erro novas dizem o que fazer em seguida, no padrão de `src/errors.ts` e `toGitLabError`.
 - [ ] Nenhum segredo (token, `.env`) foi adicionado ao repositório.
 - [ ] `dist/` não foi editado manualmente.

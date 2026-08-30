@@ -7,6 +7,7 @@ import {
   inlineUntrusted,
   pick,
   untrusted,
+  withInlineNote,
   withUntrustedNote,
 } from './format.js';
 import type { TraceRender } from './trace.js';
@@ -166,7 +167,9 @@ export function renderPipeline(
   const out: string[] = [
     `MR ${label}!${iid} — pipeline #${val(p.id)}: ${val(p.status)}`,
     `  sha        = ${shortSha(p.sha)}`,
-    // ref é nome de branch: texto livre de quem abriu o MR.
+    // ref é nome de branch: texto livre de quem abriu o MR. Mesma regra, mesma
+    // string e mesma marcação que `source_branch` em src/mrs.ts — ver o bloco
+    // REGRA ÚNICA DE MARCAÇÃO lá.
     `  ref        = ${inlineUntrusted(p.ref)}`,
     `  source     = ${p.source ?? '(não informado)'}`,
     `  criado     = ${val(p.created_at)}`,
@@ -236,15 +239,6 @@ export function renderPipelineList(items: PipelineView[], page: Record<string, u
  * inlineUntrusted. O aviso de corte também fica fora: é texto do servidor e diz
  * o que fazer em seguida, não pode chegar como dado que a nota manda ignorar.
  */
-/**
- * A nota inline vale para toda resposta que carrega nome/stage/branch fora de
- * envelope — inclusive as saídas curtas de "nunca começou" e "log apagado",
- * que também imprimem o nome do job.
- */
-export function withInlineNote(text: string): string {
-  return `${text}\n\n${INLINE_UNTRUSTED_NOTE}`;
-}
-
 export function renderJobLog(job: JobView, trace: TraceRender): string {
   const reason = job.failure_reason ? ` — failure_reason: ${inlineUntrusted(job.failure_reason, 60)}` : '';
   const header =
