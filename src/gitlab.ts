@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { Agent, setGlobalDispatcher } from 'undici';
 import { getConfig } from './config.js';
 import { GitLabError } from './errors.js';
+import { inlineUntrusted } from './format.js';
 
 /** Log sempre em stderr. stdout é do protocolo MCP. */
 export function log(msg: string): void {
@@ -281,11 +282,48 @@ async function readBody(
   }
 }
 
+/** Quanto do corpo entra na mensagem quando o parse falha. Basta para ver que é HTML. */
+const PARSE_PREVIEW_CHARS = 200;
+
+/**
+ * Parse do corpo 2xx, traduzido como qualquer outra falha. Um 200 com corpo
+ * não-JSON é real: proxy corporativo ou captive portal respondendo a página de
+ * login, reverse proxy na frente do GitLab devolvendo HTML de erro com status
+ * ok. Sem esta tradução o SyntaxError cru do JSON.parse sobe até o wrapper
+ * tool() e chega ao modelo como `Unexpected token '<'` — sem citar variável
+ * nenhuma e sem dizer o que fazer em seguida.
+ *
+ * Corpo vazio continua virando null: 204 e 200 sem body são respostas
+ * legítimas, e quem precisa de objeto rejeita o null com contexto próprio
+ * (`fetchJob`, src/tools/pipelines.ts).
+ */
+export function parseJsonBody<T>(text: string, resource: string, status: number): T {
+  if (!text) return null as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const cfg = getConfig();
+    const looksHtml = /^\s*(?:<!doctype|<html|<\?xml|<)/i.test(text);
+    const cause = looksHtml
+      ? 'O corpo é HTML, não JSON — quem respondeu provavelmente não foi o GitLab (proxy, captive portal ou página de login).'
+      : 'O corpo não é JSON.';
+    // Prefixo pela mesma primitiva de texto inline não confiável das tools:
+    // corpo de proxy desconhecido não entra cru numa linha que o servidor
+    // escreveu.
+    const preview = inlineUntrusted(text, PARSE_PREVIEW_CHARS);
+    throw new GitLabError(
+      `Resposta ${status} de ${resource} não pôde ser lida como JSON. ${cause} Confira GITLAB_URL (${cfg.url}) e se há proxy interceptando a saída. Começo do corpo: ${preview}`,
+      status,
+      text,
+    );
+  }
+}
+
 /** Uma chamada à API v4. Lança GitLabError já traduzido. */
 export async function gl<T>(path: string, opts: RequestOptions = {}): Promise<GitLabResponse<T>> {
   const res = await request(path, opts, 'application/json');
   const { text } = await readBody(res, path, opts);
-  const data = (text ? JSON.parse(text) : null) as T;
+  const data = parseJsonBody<T>(text, opts.resource ?? path, res.status);
   return { data, page: readPage(res.headers) };
 }
 
