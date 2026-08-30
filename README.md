@@ -186,7 +186,7 @@ Se o passo 7 ou 8 falhar, a mensagem de erro diz quais linhas *de fato* existem 
 - **`comment_on_mr_line` busca `diff_refs` fresco** com um GET do MR imediatamente antes do POST, e nunca aceita os shas como parâmetro: se alguém deu push, os shas velhos invalidam a posição.
 - **Validação local antes do POST.** A tool confere que o arquivo está no MR e que a linha existe no lado pedido. Se não existir, falha localmente listando as linhas válidas, em vez de mandar pro GitLab e devolver um 400 opaco. Se mesmo assim vier 400, a mensagem do GitLab volta **na íntegra** junto com o payload enviado.
 - **Linha de contexto exige os dois números.** `side="context"` sem `context_old_line` é rejeitado localmente, com o valor correto na mensagem.
-- **Prompt injection.** `description` de MR e `body` de comentário são conteúdo escrito por qualquer pessoa com acesso ao GitLab. Vêm envelopados em `<untrusted source="gitlab:...">` e a resposta carrega uma nota dizendo que aquilo é dado, não instrução. Não é blindagem; é o mínimo defensável.
+- **Prompt injection.** Todo texto escrito por quem abriu o MR é marcado, em qualquer tool por onde saia. `description` e `body` de comentário vêm envelopados em `<untrusted source="gitlab:...">`; título, `source_branch`, `target_branch`, `ref` de pipeline, nome de job, stage e `failure_reason` são valores no meio de uma linha, então vêm neutralizados inline (ANSI, quebra de linha e delimitador). Nos dois casos a resposta carrega uma nota dizendo que aquilo é dado, não instrução. Não é blindagem; é o mínimo defensável. A regra e o porquê estão em `docs/adr/2026-08-30-mr-title-and-branch-names-are-untrusted.md`.
 - **Comentário multi-linha está fora de escopo.** Só linha única.
 
 ## Testes
@@ -200,6 +200,7 @@ Todos offline. Cobrem a lógica pura — onde saída errada parece plausível:
 - **`src/diff.ts`** — hunk misto, múltiplos hunks, arquivo novo/deletado/renomeado, `\ No newline at end of file`, truncamento em 400 linhas, binário. É o que quebra `comment_on_mr_line` quando erra.
 - **`src/trace.ts`** — ANSI (CSI e OSC), marcador de seção, prefixo de timestamp e de stream, colapso de barra de progresso, corte pela cauda em limite de linha.
 - **`src/pipelines.ts`** — whitelist de campos, escolha da pipeline mais recente, precedência entre "nunca começou" e "log apagado", envelope `<untrusted>`.
+- **`src/mrs.ts`** — classificação de cada campo de MR (texto do autor × texto do servidor) e a marcação de fato aplicada. Quebra quando alguém adiciona campo novo cru ao lado dos marcados.
 - **`src/tools/index.ts`** — a superfície registrada é exatamente 13 tools, o que pega tanto tool nova que não registrou quanto tool existente derrubada por engano.
 
 Sem testes de integração e sem mock de HTTP: a camada de I/O não tem cobertura, e o que isso deixa de fora está declarado em `docs/features/001-ci-pipelines/tests.md` em vez de subentendido.
@@ -216,6 +217,7 @@ src/
 ├── diff.ts        # parser de diff unificado (puro, testado)
 ├── trace.ts       # limpeza e corte pela cauda de log de job (puro, testado)
 ├── pipelines.ts   # projeção, decisão e renderização de CI (puro, testado)
+├── mrs.ts         # projeção e marcação de campos de MR (puro, testado)
 ├── format.ts      # whitelist, truncamento, blocos <untrusted>
 └── tools/         # as 13 tools, agrupadas por domínio
 ```
