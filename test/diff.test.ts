@@ -6,6 +6,8 @@ import {
   parseDiffFile,
   parseHunks,
   renderFiles,
+  MAX_DIFF_BODY_CHARS,
+  MAX_DIFF_LINE_CHARS,
   type RawDiffFile,
 } from '../src/diff.js';
 
@@ -227,6 +229,102 @@ describe('7. truncamento por arquivo', () => {
     const last = lines.filter((l) => l.startsWith('  add')).at(-1)!;
     expect(last.endsWith('| conteudo da linha 399')).toBe(true);
     expect(out).not.toContain('conteudo da linha 400');
+  });
+});
+
+describe('8. teto de caracteres por linha', () => {
+  const huge = 'x'.repeat(500_000);
+  const file = parseDiffFile({
+    old_path: 'bundle.min.js',
+    new_path: 'bundle.min.js',
+    diff: d('@@ -1 +1 @@', `+${huge}`),
+  });
+
+  const out = renderFiles([file]);
+
+  it('não deixa a linha gigante chegar inteira', () => {
+    expect(out).not.toContain(huge);
+    expect(out.length).toBeLessThan(10_000);
+  });
+
+  it('marca o corte com o que sobrou', () => {
+    const line = out.split('\n').find((l) => l.startsWith('  add'))!;
+    expect(line.length).toBeLessThanOrEqual(MAX_DIFF_LINE_CHARS + 40);
+    // 500000 chars de texto + o prefixo `  add  new=1 | ` que a renderização escreve.
+    expect(line).toMatch(/…\[linha truncada: \+\d+ chars\]$/);
+  });
+
+  it('corta também o cabeçalho @@ quando ele é gigante', () => {
+    const wide = parseDiffFile({
+      old_path: 'a.ts',
+      new_path: 'a.ts',
+      diff: d(`@@ -1,1 +1,1 @@ ${'c'.repeat(9_000)}`, '+um'),
+    });
+    const header = renderFiles([wide]).split('\n').find((l) => l.startsWith('@@'))!;
+    expect(header.length).toBeLessThanOrEqual(MAX_DIFF_LINE_CHARS + 40);
+    expect(header).toContain('…[linha truncada: +');
+  });
+});
+
+describe('9. teto de caracteres do corpo', () => {
+  // Linha abaixo do teto por linha: aqui o único corte possível é o de tamanho.
+  // 400 delas por arquivo × 4 arquivos passariam pelo teto de 1500 linhas e
+  // ainda seriam ~2 MB de contexto.
+  const wide = 'y'.repeat(1_500);
+  const files = Array.from({ length: 4 }, (_, f) =>
+    parseDiffFile({
+      old_path: `f${f}.txt`,
+      new_path: `f${f}.txt`,
+      new_file: true,
+      diff: d('@@ -0,0 +1,400 @@', ...Array.from({ length: 400 }, () => `+${wide}`)),
+    }),
+  );
+
+  const out = renderFiles(files, { maxLinesPerFile: 400, maxTotalLines: 1500 });
+
+  it('limita o corpo em caracteres, não só em linhas', () => {
+    const linhas = out.split('\n').filter((l) => l.startsWith('  add'));
+    expect(linhas.length).toBeLessThan(1500); // o teto de linhas sozinho deixaria passar 1500
+    expect(out.length).toBeLessThan(MAX_DIFF_BODY_CHARS * 1.1);
+  });
+
+  it('corta em limite de linha', () => {
+    for (const l of out.split('\n').filter((l) => l.startsWith('  add'))) {
+      expect(l.endsWith(`| ${wide}`)).toBe(true);
+    }
+  });
+
+  it('avisa que o corte foi por tamanho e não promete que path= resolve', () => {
+    expect(out).toContain(`limite de ${MAX_DIFF_BODY_CHARS} chars da resposta atingido`);
+    expect(out).toContain('o mesmo teto de tamanho vale lá');
+  });
+
+  it('lista os arquivos que ficaram de fora pelo tamanho', () => {
+    expect(out).toContain(`arquivo(s) omitido(s) pelo limite de ${MAX_DIFF_BODY_CHARS} chars da resposta`);
+    expect(out).toContain('f3.txt');
+    // Nenhum cabeçalho vazio: arquivo omitido não aparece como se não tivesse alterações.
+    expect(out).not.toContain('=== f3.txt (new file) ===');
+  });
+});
+
+describe('10. os dois tetos convivem com o corte por contagem', () => {
+  const file = parseDiffFile({
+    old_path: 'big.txt',
+    new_path: 'big.txt',
+    new_file: true,
+    diff: d('@@ -0,0 +1,500 @@', ...Array.from({ length: 500 }, (_, i) => `+linha ${i + 1}`)),
+  });
+
+  it('mantém o conselho de path= quando o corte foi por contagem de linhas', () => {
+    const out = renderFiles([file], { maxLinesPerFile: 400, maxTotalLines: 1500 });
+    expect(out).toContain('[truncado: 101 linhas restantes neste arquivo — use path="big.txt" para ver isolado]');
+    expect(out).not.toContain('da resposta atingido');
+  });
+
+  it('troca o conselho quando o corte foi por tamanho', () => {
+    const out = renderFiles([file], { maxLinesPerFile: 400, maxTotalLines: 1500, maxBodyChars: 500 });
+    expect(out).toContain('chars da resposta atingido');
+    expect(out.length).toBeLessThan(1_000);
   });
 });
 

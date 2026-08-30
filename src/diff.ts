@@ -180,15 +180,41 @@ export function contextPairs(file: ParsedFile): ContextPair[] {
 
 // --- renderização ---------------------------------------------------------
 
+/**
+ * Teto por linha renderizada, para a linha única gigante — bundle minificado,
+ * lockfile, `.svg` gerado, fixture base64. Mesmo número e mesma razão do
+ * `MAX_LINE_CHARS` de `src/trace.ts`: teto de linhas sozinho não segura nada
+ * quando UMA linha tem megabytes.
+ */
+export const MAX_DIFF_LINE_CHARS = 2_000;
+
+/**
+ * Teto do corpo DEVOLVIDO, aplicado depois do teto por linha e em limite de
+ * linha. O teto por linha não limita o total: 1500 linhas de 2 KB passam pelo
+ * corte anterior e ainda são ~3 MB de contexto. Mesmo número do
+ * `MAX_BODY_CHARS` de `src/trace.ts`.
+ */
+export const MAX_DIFF_BODY_CHARS = 60_000;
+
 export interface RenderOptions {
   /** Default 400. */
   maxLinesPerFile?: number;
   /** Default 1500. */
   maxTotalLines?: number;
+  /** Default MAX_DIFF_LINE_CHARS. */
+  maxLineChars?: number;
+  /** Default MAX_DIFF_BODY_CHARS. */
+  maxBodyChars?: number;
+}
+
+/** Corta a linha renderizada e diz quanto ficou de fora. Nunca corta em silêncio. */
+function capLine(line: string, maxLineChars: number): string {
+  if (line.length <= maxLineChars) return line;
+  return `${line.slice(0, maxLineChars)}…[linha truncada: +${line.length - maxLineChars} chars]`;
 }
 
 /** Linhas renderizadas de um arquivo (cabeçalhos @@ inclusos), sem o `=== ... ===`. */
-export function renderBody(file: ParsedFile): string[] {
+export function renderBody(file: ParsedFile, maxLineChars: number = MAX_DIFF_LINE_CHARS): string[] {
   let wOld = 0;
   let wNew = 0;
   for (const h of file.hunks) {
@@ -200,62 +226,128 @@ export function renderBody(file: ParsedFile): string[] {
 
   const out: string[] = [];
   for (const h of file.hunks) {
-    out.push(h.header);
+    // O cabeçalho @@ também passa pelo teto: o trecho depois do segundo @@ é
+    // texto livre do arquivo e pode ser tão longo quanto qualquer linha.
+    out.push(capLine(h.header, maxLineChars));
     for (const l of h.lines) {
       const o = (l.oldLine !== undefined ? `old=${l.oldLine}` : '').padEnd(wOld);
       const n = (l.newLine !== undefined ? `new=${l.newLine}` : '').padEnd(wNew);
-      out.push(`  ${l.kind}  ${o} ${n} | ${l.text}`);
+      out.push(capLine(`  ${l.kind}  ${o} ${n} | ${l.text}`, maxLineChars));
     }
   }
   return out;
 }
 
 /**
- * Texto final do diff. Trunca por arquivo e no total, sempre em limites de
- * linha — nunca no meio de uma.
+ * Texto final do diff. Trunca por arquivo, no total de linhas e no total de
+ * caracteres, sempre em limites de linha — nunca no meio de uma.
+ *
+ * Corte por CONTAGEM e corte por TAMANHO recebem conselhos diferentes, como em
+ * `renderTrace`: pedir `path=` resolve o primeiro, mas o teto de tamanho vale
+ * igual na chamada isolada, e prometer o contrário vira retry sem progresso.
  */
 export function renderFiles(files: ParsedFile[], opts: RenderOptions = {}): string {
   const maxPerFile = opts.maxLinesPerFile ?? 400;
   const maxTotal = opts.maxTotalLines ?? 1500;
+  const maxLineChars = opts.maxLineChars ?? MAX_DIFF_LINE_CHARS;
+  const maxBodyChars = opts.maxBodyChars ?? MAX_DIFF_BODY_CHARS;
 
   const out: string[] = [];
-  const omitted: string[] = [];
-  let used = 0;
+  const omittedByLines: string[] = [];
+  const omittedBySize: string[] = [];
+  let usedLines = 0;
+  let usedChars = 0;
+  // Uma vez estourado o teto de tamanho, nenhum arquivo seguinte entra: um
+  // cabeçalho curto ainda caberia e produziria um `=== x ===` sem corpo, que
+  // lê como "arquivo sem alterações" e é mentira.
+  let sizeExhausted = false;
+
+  const push = (...lines: string[]): void => {
+    for (const l of lines) {
+      out.push(l);
+      usedChars += l.length + 1;
+    }
+  };
+  const fits = (line: string): boolean => usedChars + line.length + 1 <= maxBodyChars;
 
   for (const file of files) {
+    if (sizeExhausted) {
+      omittedBySize.push(file.path);
+      continue;
+    }
+
+    const head = `=== ${file.label} ===`;
+
     if (file.binary) {
-      out.push(`=== ${file.label} ===`, '');
+      if (!fits(head)) {
+        sizeExhausted = true;
+        omittedBySize.push(file.path);
+        continue;
+      }
+      push(head, '');
       continue;
     }
 
-    const body = renderBody(file);
+    const body = renderBody(file, maxLineChars);
     if (body.length === 0) {
-      out.push(`=== ${file.label} ===`, '  (sem alterações de texto)', '');
+      if (!fits(head)) {
+        sizeExhausted = true;
+        omittedBySize.push(file.path);
+        continue;
+      }
+      push(head, '  (sem alterações de texto)', '');
       continue;
     }
 
-    const budget = Math.min(maxPerFile, maxTotal - used);
-    if (budget <= 0) {
-      omitted.push(file.path);
+    const lineBudget = Math.min(maxPerFile, maxTotal - usedLines);
+    if (lineBudget <= 0) {
+      omittedByLines.push(file.path);
       continue;
     }
+    if (!fits(head)) {
+      sizeExhausted = true;
+      omittedBySize.push(file.path);
+      continue;
+    }
+    push(head);
 
-    out.push(`=== ${file.label} ===`);
-    const take = Math.min(budget, body.length);
-    out.push(...body.slice(0, take));
-    used += take;
+    const wanted = Math.min(lineBudget, body.length);
+    let taken = 0;
+    let cutBySize = false;
+    while (taken < wanted) {
+      const line = body[taken]!;
+      if (!fits(line)) {
+        cutBySize = true;
+        sizeExhausted = true;
+        break;
+      }
+      push(line);
+      taken++;
+    }
+    usedLines += taken;
 
-    if (take < body.length) {
-      out.push(
-        `[truncado: ${body.length - take} linhas restantes neste arquivo — use path="${file.path}" para ver isolado]`,
+    if (taken < body.length) {
+      const rest = body.length - taken;
+      // Aviso e separador contam no orçamento: são poucos chars por arquivo,
+      // mas com 100 arquivos o "teto" viraria teto + 100 linhas de aviso.
+      push(
+        cutBySize
+          ? `[truncado: ${rest} linha(s) restantes neste arquivo — limite de ${maxBodyChars} chars da resposta atingido; path="${file.path}" isola o arquivo, mas o mesmo teto de tamanho vale lá]`
+          : `[truncado: ${rest} linhas restantes neste arquivo — use path="${file.path}" para ver isolado]`,
       );
     }
-    out.push('');
+    push('');
   }
 
-  if (omitted.length > 0) {
+  if (omittedByLines.length > 0) {
     out.push(
-      `[${omitted.length} arquivo(s) omitido(s) pelo limite global de ${maxTotal} linhas: ${omitted.join(', ')} — use path="<arquivo>" para ver isolado]`,
+      `[${omittedByLines.length} arquivo(s) omitido(s) pelo limite global de ${maxTotal} linhas: ${omittedByLines.join(', ')} — use path="<arquivo>" para ver isolado]`,
+    );
+  }
+
+  if (omittedBySize.length > 0) {
+    out.push(
+      `[${omittedBySize.length} arquivo(s) omitido(s) pelo limite de ${maxBodyChars} chars da resposta: ${omittedBySize.join(', ')} — use path="<arquivo>" para ver um por vez]`,
     );
   }
 
