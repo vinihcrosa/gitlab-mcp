@@ -60,6 +60,7 @@ gitlab-mcp/
 │   ├── diff.test.ts      # parser de diff
 │   ├── trace.test.ts     # limpeza e corte de trace
 │   ├── pipelines.test.ts # projeção, decisão e renderização de CI
+│   ├── gitlab.test.ts    # parse do corpo 2xx que não é JSON
 │   └── register.test.ts  # superfície de tools registradas
 └── dist/                 # saída compilada do tsc — nunca edite à mão
 ```
@@ -78,7 +79,7 @@ Estes são os únicos scripts definidos em `package.json`. Não existem outros c
 | `npm test` | `vitest run` — roda a suíte uma vez. |
 | `npm run test:watch` | `vitest` — roda a suíte em modo watch. |
 
-O runtime exigido é **Node >= 20** (campo `engines` do `package.json`). Os testes cobrem a lógica pura do projeto: `test/diff.test.ts` (parser de diff), `test/trace.test.ts` (limpeza e corte de trace de job), `test/pipelines.test.ts` (projeção, decisão e renderização de CI) e `test/register.test.ts` (superfície de tools registradas). O critério é o registrado em comentário no topo de `src/diff.ts`: lógica pura, onde saída errada parece plausível. Camada de I/O segue sem teste — não há fixture server, e isso está declarado em `docs/features/001-ci-pipelines/tests.md`.
+O runtime exigido é **Node >= 20** (campo `engines` do `package.json`). Os testes cobrem a lógica pura do projeto: `test/diff.test.ts` (parser de diff), `test/trace.test.ts` (limpeza e corte de trace de job), `test/pipelines.test.ts` (projeção, decisão e renderização de CI), `test/gitlab.test.ts` (tradução do corpo 2xx que não é JSON) e `test/register.test.ts` (superfície de tools registradas). O critério é o registrado em comentário no topo de `src/diff.ts`: lógica pura, onde saída errada parece plausível. Camada de I/O segue sem teste — não há fixture server, e isso está declarado em `docs/features/001-ci-pipelines/tests.md`.
 
 ## 4. Invariantes de domínio (derivados do código-fonte)
 
@@ -115,7 +116,7 @@ Estes invariantes vêm diretamente do código. Cada um deles tem consequência c
 - **Inputs de tool** são declarados com schemas `zod` (`ZodRawShape`) passados ao SDK MCP via o wrapper `tool()` de `src/tools/register.ts`. Cada campo tem `.describe()` orientando o modelo consumidor.
 - **Erros viram texto lido pelo modelo.** A regra registrada em `src/errors.ts`: a mensagem tem que dizer o que fazer em seguida. Stack trace não ajuda o modelo a se corrigir e não deve aparecer em saída de tool.
 - Há duas classes de erro: `GitLabError` (falha vinda da API, já traduzida por status em `toGitLabError`, com o corpo cru preservado em `body`) e `ToolError` (falha detectada localmente: validação, read-only, input incoerente). O wrapper `tool()` captura qualquer exceção e devolve `{ isError: true }` com a mensagem de `messageOf()`.
-- Erros HTTP são traduzidos por status: 401 (token inválido/expirado), 403 (escopo insuficiente — provavelmente `read_api` onde precisa `api`), 404 (não encontrado ou sem acesso), 400 (recusa do GitLab, com a mensagem original anexada), 429 (rate limit, após o retry único), 5xx (erro do GitLab). Timeout e falha de rede geram mensagens que citam `GITLAB_TIMEOUT_MS`, `GITLAB_URL`, VPN e `GITLAB_CA_CERT` como próximos passos.
+- Erros HTTP são traduzidos por status: 401 (token inválido/expirado), 403 (escopo insuficiente — provavelmente `read_api` onde precisa `api`), 404 (não encontrado ou sem acesso), 400 (recusa do GitLab, com a mensagem original anexada), 429 (rate limit, após o retry único), 5xx (erro do GitLab). Timeout e falha de rede geram mensagens que citam `GITLAB_TIMEOUT_MS`, `GITLAB_URL`, VPN e `GITLAB_CA_CERT` como próximos passos. Resposta 2xx cujo corpo não é JSON também é traduzida (`parseJsonBody`, `src/gitlab.ts`): a mensagem aponta `GITLAB_URL` e proxy como suspeitos e mostra o começo do corpo — nenhum `SyntaxError` cru de `JSON.parse` chega ao modelo.
 - No 400 de `comment_on_mr_line`, a mensagem repassa a resposta crua do GitLab **e** o payload enviado — é o que permite o modelo se corrigir sozinho.
 - Mantenha esse padrão em qualquer código novo: erro acionável, em português, dizendo qual tool ou variável usar em seguida. Este ponto ecoa o invariante da seção 4: nenhuma tool devolve JSON cru, nem em caso de erro.
 
